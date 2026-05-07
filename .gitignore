@@ -1,0 +1,23 @@
+node_modules
+dist
+.vscode/
+.idea/
+
+# Tauri / Rust build output (also covered in src-tauri/.gitignore)
+src-tauri/target/
+src-tauri/gen/
+
+# User data (only created in release builds, but never commit)
+data/
+src-tauri/data/
+
+# Logs
+*.log
+
+# Playwright MCP working dir (screenshots, snapshots)
+.playwright-mcp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp

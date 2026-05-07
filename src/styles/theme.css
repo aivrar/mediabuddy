@@ -1,0 +1,103 @@
+/*
+ * Dark palette ported from core/theme.py (the original Python theme).
+ * Same color values, exposed as CSS custom properties.
+ * A future light theme just swaps these on :root[data-theme="light"].
+ */
+
+:root,
+:root[data-theme="dark"] {
+  /* Backgrounds */
+  --bg-main: #1e1e1e;
+  --bg-card: #2d2d2d;
+  --bg-sidebar: #252525;
+  --bg-input: #3c3c3c;
+  --bg-hover: #383838;
+  --bg-selected: #404040;
+
+  /* Text */
+  --text-primary: #e0e0e0;
+  --text-secondary: #b0b0b0;
+  --text-hint: #a0a0a0;
+  --text-disabled: #707070;
+
+  /* Accents */
+  --accent: #3b9eff;
+  --accent-dark: #2d7fd4;
+  --accent-light: #1a3a52;
+
+  /* Status */
+  --success: #81c784;
+  --success-dark: #66bb6a;
+  --warning: #ffcc80;
+  --warning-dark: #ffb74d;
+  --danger: #ff8a80;
+  --danger-dark: #ff6b6b;
+  --info: #42a5f5;
+
+  /* Borders & separators */
+  --border: #444444;
+  --border-light: #3a3a3a;
+  --border-dark: #555555;
+  --separator: #404040;
+
+  /* Scrollbars */
+  --scrollbar-bg: #2a2a2a;
+  --scrollbar-fg: #555555;
+
+  /* Tooltip */
+  --tooltip-bg: #e0e0e0;
+  --tooltip-fg: #1e1e1e;
+
+  /* Type scale (point sizes from theme.py converted to px at 96 DPI) */
+  --font-heading-size: 17px;
+  --font-subheading-size: 15px;
+  --font-body-size: 13px;
+  --font-small-size: 12px;
+  --font-stack: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system,
+    sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New",
+    monospace;
+
+  /* Layout */
+  --footer-height: 56px;
+  --tab-strip-height: 44px;
+  --radius: 6px;
+  --radius-sm: 4px;
+}
+
+:root[data-theme="light"] {
+  --bg-main: #f5f5f5;
+  --bg-card: #ffffff;
+  --bg-sidebar: #eaeaea;
+  --bg-input: #ffffff;
+  --bg-hover: #e8f4fc;
+  --bg-selected: #d0e8f8;
+
+  --text-primary: #212121;
+  --text-secondary: #555555;
+  --text-hint: #888888;
+  --text-disabled: #aaaaaa;
+
+  --accent: #0066cc;
+  --accent-dark: #0052a3;
+  --accent-light: #e3f2fd;
+
+  --success: #4caf50;
+  --success-dark: #388e3c;
+  --warning: #ff9800;
+  --warning-dark: #f57c00;
+  --danger: #d32f2f;
+  --danger-dark: #b71c1c;
+  --info: #2196f3;
+
+  --border: #cccccc;
+  --border-light: #e0e0e0;
+  --border-dark: #999999;
+  --separator: #dddddd;
+
+  --scrollbar-bg: #e0e0e0;
+  --scrollbar-fg: #b0b0b0;
+
+  --tooltip-bg: #333333;
+  --tooltip-fg: #ffffff;
+}

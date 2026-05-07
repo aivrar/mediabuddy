@@ -1,0 +1,119 @@
+.logtab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+.log-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.log-header h2 {
+  margin: 0;
+  font-size: var(--font-heading-size);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.log-header .hint {
+  margin: 4px 0 0;
+  color: var(--text-hint);
+  font-size: var(--font-small-size);
+}
+
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.log-error {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  border-left: 3px solid var(--danger);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-small-size);
+  color: var(--text-primary);
+}
+
+.log-window {
+  flex: 1;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 8px 4px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  min-height: 320px;
+  max-height: calc(100vh - var(--tab-strip-height) - var(--footer-height) - 200px);
+}
+
+.log-empty {
+  color: var(--text-hint);
+  text-align: center;
+  padding: 20px;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 78px 60px 220px 1fr;
+  gap: 12px;
+  padding: 3px 12px;
+  align-items: baseline;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-row:hover {
+  background: var(--bg-hover);
+}
+
+.log-time {
+  color: var(--text-hint);
+}
+.log-level {
+  color: var(--text-secondary);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+.log-target {
+  color: var(--text-hint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.log-message {
+  color: var(--text-primary);
+}
+
+.level-trace .log-level,
+.level-debug .log-level {
+  color: var(--text-hint);
+}
+.level-info .log-level {
+  color: var(--accent);
+}
+.level-warn .log-level {
+  color: var(--warning);
+}
+.level-error .log-level,
+.level-error .log-message {
+  color: var(--danger);
+}
+
+.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.inline-label {
+  color: var(--text-hint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}

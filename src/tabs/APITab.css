@@ -1,0 +1,150 @@
+.apitab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.api-header h2 {
+  margin: 0;
+  font-size: var(--font-heading-size);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.api-header .hint {
+  margin: 4px 0 0;
+  color: var(--text-hint);
+  font-size: var(--font-small-size);
+  max-width: 70ch;
+}
+
+.api-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  border-left: 4px solid var(--text-disabled);
+}
+
+.api-status.running {
+  border-left-color: var(--success);
+}
+.api-status.stopped {
+  border-left-color: var(--text-disabled);
+}
+
+.api-status-label {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.api-status.running .api-status-label {
+  color: var(--success);
+}
+.api-status-meta {
+  color: var(--text-secondary);
+  font-size: var(--font-small-size);
+  margin-top: 2px;
+  font-family: var(--font-mono);
+}
+
+.api-baseurl {
+  background: var(--bg-card);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-small-size);
+  color: var(--text-secondary);
+}
+
+.mono-inline {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.api-error {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  border-left: 3px solid var(--danger);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-small-size);
+  color: var(--text-primary);
+}
+
+.api-routes h3 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: var(--font-subheading-size);
+  font-weight: 600;
+}
+
+.route-list {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.route-row {
+  display: grid;
+  grid-template-columns: 70px 320px 1fr 110px;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--separator);
+  align-items: center;
+  font-size: var(--font-small-size);
+}
+.route-row:last-child {
+  border-bottom: none;
+}
+.route-row.stub .route-method,
+.route-row.stub .route-path,
+.route-row.stub .route-desc {
+  opacity: 0.55;
+}
+
+.route-method {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  text-align: center;
+}
+.route-method.method-get {
+  color: var(--accent);
+}
+.route-method.method-post {
+  color: var(--success);
+}
+.route-method.method-put {
+  color: var(--warning);
+}
+.route-method.method-delete {
+  color: var(--danger);
+}
+
+.route-path {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+.route-desc {
+  color: var(--text-secondary);
+}
+.route-state {
+  font-size: 11px;
+  color: var(--text-hint);
+  text-align: right;
+}
+
+.route-row.stub .route-state {
+  color: var(--warning);
+}

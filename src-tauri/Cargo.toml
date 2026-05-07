@@ -1,0 +1,68 @@
+[package]
+name = "mediabuddy"
+version = "0.1.0"
+description = "Media Buddy - stock photo + video search, download, and AI captioning"
+edition = "2021"
+
+[lib]
+name = "mediabuddy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri shell
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime + HTTP
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+futures-util = "0.3"
+bytes = "1"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Image processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+# REST API server
+axum = { version = "0.8", features = ["macros", "multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+
+# System monitoring
+sysinfo = "0.32"
+nvml-wrapper = "0.10"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+directories = "5"
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# ONNX inference (Florence-2). Uses the bundled CPU execution provider for
+# now; DirectML/CUDA can be enabled later via additional `ort` features.
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls"] }
+ndarray = "0.16"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+

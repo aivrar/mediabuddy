@@ -1,0 +1,43 @@
+.tabs {
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+  gap: 2px;
+  -webkit-app-region: drag;
+}
+
+.tab {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text-secondary);
+  padding: 0 20px;
+  font-size: var(--font-subheading-size);
+  font-weight: 600;
+  position: relative;
+  transition: color 120ms, background-color 120ms;
+  height: 100%;
+}
+
+.tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tab.active {
+  color: var(--accent);
+  background: var(--bg-card);
+}
+
+.tab.active::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+}
