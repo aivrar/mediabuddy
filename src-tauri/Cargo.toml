@@ -55,9 +55,25 @@ tracing-appender = "0.2"
 
 # ONNX inference (Florence-2). Uses the bundled CPU execution provider for
 # now; DirectML/CUDA can be enabled later via additional `ort` features.
-ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls"] }
-ndarray = "0.16"
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "load-dynamic"] }
+ndarray = "0.17"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+regex = "1"
+
+# HuggingFace Hub client for auto-downloading Florence-2 ONNX weights.
+# Uses HF's xet-backed HTTPS CDN under the hood (content-addressed,
+# resumable, deduplicated chunks). Default features include ureq for
+# the sync flavor (callable from spawn_blocking workers).
+hf-hub = "0.3"
+
+# Used to extract onnxruntime.dll from the zip we download from
+# microsoft/onnxruntime GitHub releases at first vision_load.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Sync HTTP for the one-time onnxruntime.dll download (the rest of the
+# app uses async reqwest, but vision_load runs on a blocking task and
+# we don't want to spawn a Tokio handle just for this).
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [profile.release]
 opt-level = 3

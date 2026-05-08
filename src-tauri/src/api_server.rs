@@ -275,15 +275,15 @@ fn build_router(ctx: ApiContext, cors_enabled: bool) -> Router {
         .route("/api/v1/download", post(handle_download_single))
         .route("/api/v1/download/batch", post(handle_download_batch))
         .route("/api/v1/tasks/{task_id}", get(handle_task_status))
-        // Vision (stubbed until ONNX integration)
+        // Vision
         .route("/api/v1/vision/status", get(handle_vision_status))
-        .route("/api/v1/vision/load", post(handle_vision_unavailable))
-        .route("/api/v1/vision/unload", post(handle_vision_unavailable))
+        .route("/api/v1/vision/load", post(handle_vision_load))
+        .route("/api/v1/vision/unload", post(handle_vision_unload))
         .route(
             "/api/v1/vision/analyze/{image_id}",
-            post(handle_vision_unavailable),
+            post(handle_vision_analyze_image),
         )
-        .route("/api/v1/vision/analyze", post(handle_vision_unavailable))
+        .route("/api/v1/vision/analyze", post(handle_vision_analyze_path))
         // Combo
         .route(
             "/api/v1/combo/search-download",
@@ -1013,9 +1013,6 @@ async fn handle_task_status(
 }
 
 // ---------- Vision (Florence-2) ----------
-// The registry surface is wired up; the actual ONNX inference pipeline is
-// scaffolded but not yet end-to-end. load/analyse routes return a clear
-// 503 with a descriptive message until inference ships.
 
 async fn handle_vision_status(State(ctx): State<ApiContext>) -> Response {
     let status = ctx.vision.status();
@@ -1028,12 +1025,163 @@ async fn handle_vision_status(State(ctx): State<ApiContext>) -> Response {
     }))
 }
 
+#[derive(Deserialize, Default)]
+struct VisionLoadBody {
+    #[serde(default)]
+    precision: Option<String>,
+    #[serde(default)]
+    count: Option<usize>,
+}
+
+async fn handle_vision_load(
+    State(ctx): State<ApiContext>,
+    body: Option<Json<VisionLoadBody>>,
+) -> Response {
+    let Json(body) = body.unwrap_or_default();
+    let precision = parse_vision_precision(body.precision.as_deref());
+    let count = body.count.unwrap_or(1);
+    let cache_dir = ctx.paths.models.clone();
+    let vision = ctx.vision.clone();
+    let load_result = tokio::task::spawn_blocking(move || vision.load(&cache_dir, precision, count))
+        .await;
+    match load_result {
+        Ok(Ok(_n)) => {
+            let st = ctx.vision.status();
+            ok(json!({
+                "ready": st.loaded,
+                "instances": st.instances,
+                "precision": st.precision,
+                "model_dir": st.model_dir,
+            }))
+        }
+        Ok(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_vision_unload(State(ctx): State<ApiContext>) -> Response {
+    ctx.vision.unload_all();
+    ok(json!({ "ready": false, "instances": 0 }))
+}
+
+#[derive(Deserialize, Default)]
+struct VisionAnalyzeBody {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    detect_objects: Option<bool>,
+}
+
+async fn handle_vision_analyze_path(
+    State(ctx): State<ApiContext>,
+    body: Option<Json<VisionAnalyzeBody>>,
+) -> Response {
+    let Json(body) = body.unwrap_or_default();
+    let Some(rel_or_abs) = body.path else {
+        return err(StatusCode::BAD_REQUEST, "path required");
+    };
+    let p = std::path::PathBuf::from(&rel_or_abs);
+    let abs = if p.is_absolute() {
+        p
+    } else {
+        ctx.paths.root.join(p)
+    };
+    if !abs.exists() {
+        return err(StatusCode::NOT_FOUND, format!("file not found: {rel_or_abs}"));
+    }
+    let need_objects = body.detect_objects.unwrap_or(true);
+    let vision = ctx.vision.clone();
+    let analysis = tokio::task::spawn_blocking(move || vision.analyse(&abs, need_objects)).await;
+    match analysis {
+        Ok(Ok(r)) => ok(json!({
+            "caption": r.caption,
+            "objects": r.objects,
+        })),
+        Ok(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_vision_analyze_image(
+    State(ctx): State<ApiContext>,
+    AxumPath(image_id): AxumPath<String>,
+    body: Option<Json<VisionAnalyzeBody>>,
+) -> Response {
+    let Json(body) = body.unwrap_or_default();
+    let need_objects = body.detect_objects.unwrap_or(true);
+
+    let mgr = ctx.image_manager.clone();
+    let id_for_lookup = image_id.clone();
+    let img = match tokio::task::spawn_blocking(move || mgr.get_image_by_id(&id_for_lookup)).await {
+        Ok(Ok(Some(img))) => img,
+        Ok(Ok(None)) => return err(StatusCode::NOT_FOUND, "image not found"),
+        Ok(Err(e)) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    if img.path.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "image has no local path (preview-only)");
+    }
+    let abs_path = ctx.paths.root.join(&img.path);
+    if !abs_path.exists() {
+        return err(StatusCode::NOT_FOUND, "image file missing on disk");
+    }
+
+    let vision = ctx.vision.clone();
+    let analysis_path = abs_path.clone();
+    let analysis =
+        tokio::task::spawn_blocking(move || vision.analyse(&analysis_path, need_objects)).await;
+    let result = match analysis {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    // Persist: caption -> alt, object labels -> tags (deduped), mark processed.
+    let caption_for_db = result.caption.clone();
+    let mut tag_set: Vec<String> = result
+        .objects
+        .iter()
+        .map(|o| o.label.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !img.tags.is_empty() {
+        for t in &img.tags {
+            if !tag_set.contains(t) {
+                tag_set.push(t.clone());
+            }
+        }
+    }
+    let mgr2 = ctx.image_manager.clone();
+    let id2 = image_id.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        mgr2.update_image_metadata(&id2, Some(caption_for_db), Some(tag_set), Some(true))
+    })
+    .await;
+
+    ok(json!({
+        "image_id": image_id,
+        "caption": result.caption,
+        "objects": result.objects,
+    }))
+}
+
+fn parse_vision_precision(s: Option<&str>) -> crate::vision::Precision {
+    use crate::vision::Precision;
+    match s.map(|s| s.to_ascii_lowercase()) {
+        Some(s) if s == "fp16" => Precision::Fp16,
+        Some(s) if s == "int8" => Precision::Int8,
+        Some(s) if s == "q4f16" || s == "q4" => Precision::Q4f16,
+        _ => Precision::Fp32,
+    }
+}
+
 async fn handle_vision_unavailable() -> Response {
     err(
         StatusCode::SERVICE_UNAVAILABLE,
-        "Vision (Florence-2) inference is scaffolded but not yet end-to-end. \
-         The ort runtime, tokenizer and image preprocessor are in place; \
-         the encoder→decoder generation loop ships in the next release.",
+        "This combo route isn't wired up yet. Use /api/v1/vision/analyze/{image_id} \
+         after /api/v1/combo/search-download to achieve the same outcome.",
     )
 }
 

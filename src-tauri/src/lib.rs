@@ -155,9 +155,9 @@ async fn vision_load(
     state: tauri::State<'_, AppState>,
 ) -> Result<VisionStatus, String> {
     let precision = parse_precision(params.precision.as_deref());
-    let model_dir = state.paths.models.join("florence2-base-ft");
+    let cache_dir = state.paths.models.clone();
     let vision = state.vision.clone();
-    tokio::task::spawn_blocking(move || vision.load(&model_dir, precision, params.count))
+    tokio::task::spawn_blocking(move || vision.load(&cache_dir, precision, params.count))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
@@ -172,10 +172,11 @@ async fn vision_unload(state: tauri::State<'_, AppState>) -> Result<VisionStatus
 
 fn parse_precision(s: Option<&str>) -> Precision {
     match s.map(|s| s.to_ascii_lowercase()) {
-        Some(s) if s == "fp32" => Precision::Fp32,
+        Some(s) if s == "fp16" => Precision::Fp16,
         Some(s) if s == "int8" => Precision::Int8,
         Some(s) if s == "q4f16" || s == "q4" => Precision::Q4f16,
-        _ => Precision::Fp16,
+        // Default to fp32: only variant currently wired end-to-end on CPU.
+        _ => Precision::Fp32,
     }
 }
 
