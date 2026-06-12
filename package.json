@@ -1,7 +1,7 @@
 {
   "name": "mediabuddy",
   "version": "0.1.0",
-  "description": "Media Buddy - stock photo + video search, download, and AI captioning",
+  "description": "Portable Windows stock media search, download, library, REST API, and AI captioning app",
   "type": "module",
   "repository": {
     "type": "git",

@@ -10,12 +10,14 @@
 ![Issues](https://img.shields.io/github/issues/aivrar/mediabuddy)
 ![Last Commit](https://img.shields.io/github/last-commit/aivrar/mediabuddy)
 
-**Portable Windows media library builder for stock photos and videos, with local
-downloads, metadata, REST automation, and Florence-2 AI captioning.**
+**Portable Windows app to search, download, organize, preview, and AI-caption
+stock photos and videos from Pixabay, Pexels, and Unsplash.**
 
-Media Buddy is a native Windows desktop app for searching, downloading,
-organizing, previewing, and AI-captioning stock photos and videos from Pixabay,
-Pexels, and Unsplash.
+Media Buddy is a native stock image downloader and local media library for
+searching, downloading, organizing, previewing, tagging, and AI-captioning stock
+photos and videos from Pixabay, Pexels, and Unsplash. It includes batch
+downloads, provider metadata capture, a local REST API, and Florence-2 ONNX
+computer vision for captions and object tags.
 
 It is a Tauri 2 + SolidJS + Rust rewrite of the original Python ImageBuddy app.
 There is no Python runtime requirement.
