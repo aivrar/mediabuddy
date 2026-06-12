@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Media Buddy - stock photo + video search, download, and AI captioning",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aivrar/mediabuddy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aivrar/mediabuddy/issues"
+  },
+  "homepage": "https://github.com/aivrar/mediabuddy#readme",
   "scripts": {
     "start": "vite",
     "dev": "vite",

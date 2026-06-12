@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
+use crate::vision::detect_gpu_adapters;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemStats {
     pub cpu_percent: f32,
@@ -65,7 +67,10 @@ impl SystemMonitor {
             (cpu, pct, to_gb(used), to_gb(total))
         };
 
-        let gpus = self.nvml.as_ref().map(read_gpus).unwrap_or_default();
+        let mut gpus = self.nvml.as_ref().map(read_gpus).unwrap_or_default();
+        if gpus.is_empty() {
+            gpus = read_dxgi_gpus();
+        }
 
         SystemStats {
             cpu_percent,
@@ -75,6 +80,21 @@ impl SystemMonitor {
             gpus,
         }
     }
+}
+
+fn read_dxgi_gpus() -> Vec<GpuStats> {
+    detect_gpu_adapters()
+        .into_iter()
+        .map(|adapter| GpuStats {
+            index: adapter.dml_device_id,
+            name: adapter.name,
+            util_percent: 0,
+            vram_used_gb: 0.0,
+            vram_total_gb: adapter.dedicated_vram_gb.max(adapter.shared_system_gb),
+            vram_percent: 0.0,
+            temp_c: None,
+        })
+        .collect()
 }
 
 fn read_gpus(nvml: &nvml_wrapper::Nvml) -> Vec<GpuStats> {

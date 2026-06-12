@@ -49,6 +49,13 @@
   margin-top: 2px;
   font-family: var(--font-mono);
 }
+.api-status-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
 .api-baseurl {
   background: var(--bg-card);
@@ -56,6 +63,78 @@
   border-radius: var(--radius-sm);
   font-size: var(--font-small-size);
   color: var(--text-secondary);
+}
+
+.api-auth {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.api-auth-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.api-auth h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--font-subheading-size);
+  font-weight: 600;
+}
+.api-auth .hint {
+  margin: 3px 0 0;
+  color: var(--text-hint);
+  font-size: var(--font-small-size);
+}
+.api-token-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.token-label,
+.example-title {
+  color: var(--text-hint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.token-value {
+  max-width: min(100%, 520px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.api-example-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.api-example {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  background: color-mix(in srgb, var(--bg-input) 76%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+}
+.api-example .example-title {
+  grid-column: 1 / -1;
+}
+.api-example code {
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mono-inline {
@@ -102,9 +181,9 @@
 .route-row:last-child {
   border-bottom: none;
 }
-.route-row.stub .route-method,
-.route-row.stub .route-path,
-.route-row.stub .route-desc {
+.route-row.pending .route-method,
+.route-row.pending .route-path,
+.route-row.pending .route-desc {
   opacity: 0.55;
 }
 
@@ -145,6 +224,22 @@
   text-align: right;
 }
 
-.route-row.stub .route-state {
+.route-row.pending .route-state {
   color: var(--warning);
+}
+
+@media (max-width: 1100px) {
+  .api-example-grid {
+    grid-template-columns: 1fr;
+  }
+  .route-row {
+    grid-template-columns: 64px minmax(180px, 1fr);
+  }
+  .route-desc,
+  .route-state {
+    grid-column: 2;
+  }
+  .route-state {
+    text-align: left;
+  }
 }

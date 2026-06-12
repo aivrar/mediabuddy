@@ -1,4 +1,5 @@
-import { createSignal, Switch, Match, type Component } from "solid-js";
+import { createSignal, onMount, Switch, Match, type Component } from "solid-js";
+import { api } from "./lib/api";
 import "./App.css";
 import "./styles/theme.css";
 import Tabs from "./components/Tabs";
@@ -19,6 +20,28 @@ const TABS = [
 
 const App: Component = () => {
   const [active, setActive] = createSignal<TabId>("images");
+  const [shuttingDown, setShuttingDown] = createSignal(false);
+
+  // Apply the saved theme on startup (previously it was only applied when the
+  // Settings dropdown changed, so a saved "light" theme didn't take effect
+  // until the user re-selected it). Default to dark to match the window.
+  document.documentElement.setAttribute("data-theme", "dark");
+  onMount(async () => {
+    try {
+      const s = await api.getSettings();
+      document.documentElement.setAttribute("data-theme", s.theme || "dark");
+    } catch {
+      // keep the dark default
+    }
+  });
+
+  const shutdown = () => {
+    if (shuttingDown()) return;
+    setShuttingDown(true);
+    void api.shutdownApp().catch(() => {
+      window.close();
+    });
+  };
 
   return (
     <div class="app">
@@ -26,6 +49,17 @@ const App: Component = () => {
         active={active()}
         onChange={(id) => setActive(id as TabId)}
         tabs={TABS}
+        actions={
+          <button
+            type="button"
+            class="shutdown-button"
+            onClick={shutdown}
+            disabled={shuttingDown()}
+            title="Shut down Media Buddy"
+          >
+            {shuttingDown() ? "Shutting down" : "Shutdown"}
+          </button>
+        }
       />
       <main class="tab-panel">
         <div class="tab-panel-inner">

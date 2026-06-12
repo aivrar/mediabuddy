@@ -1,4 +1,4 @@
-import { For, type Component } from "solid-js";
+import { For, type Component, type JSX } from "solid-js";
 import "./Tabs.css";
 
 export type TabDef = { id: string; label: string };
@@ -7,6 +7,7 @@ type Props = {
   active: string;
   onChange: (id: string) => void;
   tabs: TabDef[];
+  actions?: JSX.Element;
 };
 
 const Tabs: Component<Props> = (props) => {
@@ -25,6 +26,8 @@ const Tabs: Component<Props> = (props) => {
           </button>
         )}
       </For>
+      <div class="tabs-spacer" aria-hidden="true" />
+      {props.actions}
     </div>
   );
 };

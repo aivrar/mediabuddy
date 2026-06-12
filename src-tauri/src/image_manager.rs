@@ -6,23 +6,54 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::db;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::paths::AppPaths;
 use crate::types::{DeleteResult, Image, NewImage};
 
 pub struct ImageManager {
     conn: Arc<Mutex<Connection>>,
     existing_urls: Arc<RwLock<HashSet<String>>>,
+    /// `(source, source_id)` pairs of items already in the library. Used
+    /// to dedup search results that re-list the same item at a different
+    /// URL tier (Pixabay's webformat vs large, etc).
+    existing_source_ids: Arc<RwLock<HashSet<(String, String)>>>,
     pub paths: AppPaths,
+}
+
+impl ImageManager {
+    /// Hands out a clone of the shared connection handle for modules that
+    /// store related data in the same SQLite file (e.g. topics).
+    pub fn conn_handle(&self) -> Arc<Mutex<Connection>> {
+        self.conn.clone()
+    }
+
+    /// True if we've ever ingested this `(source, source_id)` — including
+    /// items the user later deleted. Deletion blocks the URL via
+    /// `blocked_urls`, but a provider can re-list the same identity at a
+    /// different URL tier; keeping deleted ids in the in-memory set means
+    /// "don't re-show me what I've already evaluated" actually holds across
+    /// URL-tier churn.
+    pub fn is_source_id_saved(&self, source: &str, source_id: &str) -> bool {
+        if source_id.is_empty() {
+            return false;
+        }
+        let key = (source.to_string(), source_id.to_string());
+        self.existing_source_ids
+            .read()
+            .map(|set| set.contains(&key))
+            .unwrap_or(false)
+    }
 }
 
 impl ImageManager {
     pub fn new(paths: AppPaths) -> Result<Self> {
         let conn = db::open(&paths.db)?;
         let existing_urls = Self::load_existing_urls(&conn)?;
+        let existing_source_ids = Self::load_existing_source_ids(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             existing_urls: Arc::new(RwLock::new(existing_urls)),
+            existing_source_ids: Arc::new(RwLock::new(existing_source_ids)),
             paths,
         })
     }
@@ -40,6 +71,17 @@ impl ImageManager {
         Ok(urls)
     }
 
+    fn load_existing_source_ids(conn: &Connection) -> Result<HashSet<(String, String)>> {
+        let mut set = HashSet::new();
+        let mut stmt =
+            conn.prepare("SELECT source, source_id FROM images WHERE source_id != ''")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for r in rows {
+            set.insert(r?);
+        }
+        Ok(set)
+    }
+
     pub fn is_url_saved(&self, url: &str) -> bool {
         self.existing_urls
             .read()
@@ -54,7 +96,7 @@ impl ImageManager {
         let source_data_json = serde_json::to_string(&new.source_data)?;
         let downloaded_at = {
             let conn = self.conn.lock().unwrap();
-            conn.execute(
+            let inserted = conn.execute(
                 r#"
                 INSERT OR IGNORE INTO images
                 (id, filename, path, thumb_path, url, source, query,
@@ -102,6 +144,13 @@ impl ImageManager {
                     source_data_json,
                 ],
             )?;
+            if inserted == 0 {
+                // A row with this URL already exists (UNIQUE(url)) and the
+                // INSERT was ignored. Return a clean duplicate error so the
+                // caller can roll back the files it just wrote, instead of
+                // failing on a SELECT-by-new-id that finds nothing.
+                return Err(AppError::other("duplicate: url already in library"));
+            }
             conn.query_row(
                 "SELECT downloaded_at FROM images WHERE id = ?1",
                 params![id],
@@ -111,6 +160,11 @@ impl ImageManager {
 
         if let Ok(mut set) = self.existing_urls.write() {
             set.insert(new.url.clone());
+        }
+        if !new.source_id.is_empty() {
+            if let Ok(mut set) = self.existing_source_ids.write() {
+                set.insert((new.source.clone(), new.source_id.clone()));
+            }
         }
 
         Ok(Image {
@@ -204,50 +258,70 @@ impl ImageManager {
 
     pub fn delete_images(&self, ids: &[String]) -> Result<DeleteResult> {
         if ids.is_empty() {
-            return Ok(DeleteResult { deleted: 0, failed: 0 });
+            return Ok(DeleteResult {
+                deleted: 0,
+                failed: 0,
+            });
         }
         let mut deleted: usize = 0;
         let mut failed: usize = 0;
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        // Relative paths to remove AFTER the DB transaction commits. Removing
+        // files before commit risks a rollback leaving the DB pointing at
+        // already-deleted files; committing first means a failed removal at
+        // worst orphans a file while the DB stays consistent.
+        let mut files_to_remove: Vec<String> = Vec::new();
 
-        for id in ids {
-            let row = tx.query_row(
-                "SELECT url, path, thumb_path, source FROM images WHERE id = ?1",
-                params![id],
-                |r| {
-                    let url: String = r.get(0)?;
-                    let path: Option<String> = r.get(1)?;
-                    let thumb: Option<String> = r.get(2)?;
-                    let source: Option<String> = r.get(3)?;
-                    Ok((url, path, thumb, source))
-                },
-            );
-            let (url, path, thumb, source) = match row {
-                Ok(t) => t,
-                Err(_) => {
-                    failed += 1;
-                    continue;
+        {
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+
+            for id in ids {
+                let row = tx.query_row(
+                    "SELECT url, path, thumb_path, source FROM images WHERE id = ?1",
+                    params![id],
+                    |r| {
+                        let url: String = r.get(0)?;
+                        let path: Option<String> = r.get(1)?;
+                        let thumb: Option<String> = r.get(2)?;
+                        let source: Option<String> = r.get(3)?;
+                        Ok((url, path, thumb, source))
+                    },
+                );
+                let (url, path, thumb, source) = match row {
+                    Ok(t) => t,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
+                tx.execute("DELETE FROM images WHERE id = ?1", params![id])?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO blocked_urls (url, source) VALUES (?1, ?2)",
+                    params![url, source.unwrap_or_default()],
+                )?;
+                if let Some(p) = path {
+                    if !p.is_empty() {
+                        files_to_remove.push(p);
+                    }
                 }
-            };
-            if let Some(p) = &path {
-                if !p.is_empty() {
-                    let _ = std::fs::remove_file(self.paths.root.join(p));
+                if let Some(p) = thumb {
+                    if !p.is_empty() {
+                        files_to_remove.push(p);
+                    }
                 }
+                // We intentionally keep the `(source, source_id)` in
+                // `existing_source_ids` so a future search at a different URL
+                // tier still skips the item the user already evaluated.
+                deleted += 1;
             }
-            if let Some(p) = &thumb {
-                if !p.is_empty() {
-                    let _ = std::fs::remove_file(self.paths.root.join(p));
-                }
-            }
-            tx.execute("DELETE FROM images WHERE id = ?1", params![id])?;
-            tx.execute(
-                "INSERT OR IGNORE INTO blocked_urls (url, source) VALUES (?1, ?2)",
-                params![url, source.unwrap_or_default()],
-            )?;
-            deleted += 1;
+            tx.commit()?;
         }
-        tx.commit()?;
+
+        // DB committed and consistent — now remove files best-effort.
+        for rel in files_to_remove {
+            let _ = std::fs::remove_file(self.paths.root.join(&rel));
+        }
+
         Ok(DeleteResult { deleted, failed })
     }
 }
@@ -259,11 +333,14 @@ const SELECT_ONE_SQL: &str = "SELECT id, filename, path, thumb_path, url, source
 fn image_from_row(r: &Row<'_>) -> rusqlite::Result<Image> {
     let tags_json: String = r.get::<_, Option<String>>(10)?.unwrap_or_default();
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
-    let urls_json: String = r.get::<_, Option<String>>(17)?.unwrap_or_else(|| "{}".to_string());
+    let urls_json: String = r
+        .get::<_, Option<String>>(17)?
+        .unwrap_or_else(|| "{}".to_string());
     let urls: Value = serde_json::from_str(&urls_json).unwrap_or_else(|_| json!({}));
-    let source_data_json: String = r.get::<_, Option<String>>(31)?.unwrap_or_else(|| "{}".to_string());
-    let source_data: Value =
-        serde_json::from_str(&source_data_json).unwrap_or(Value::Null);
+    let source_data_json: String = r
+        .get::<_, Option<String>>(31)?
+        .unwrap_or_else(|| "{}".to_string());
+    let source_data: Value = serde_json::from_str(&source_data_json).unwrap_or(Value::Null);
     let kind: String = r
         .get::<_, Option<String>>(15)?
         .filter(|s| !s.is_empty())
@@ -307,4 +384,3 @@ fn image_from_row(r: &Row<'_>) -> rusqlite::Result<Image> {
         source_data,
     })
 }
-

@@ -40,8 +40,10 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 # System monitoring
 sysinfo = "0.32"
 nvml-wrapper = "0.10"
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_System_LibraryLoader"] }
 
 # Utilities
+sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "5"
@@ -80,5 +82,3 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
-

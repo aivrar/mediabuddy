@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.bmp binary
+*.mp4 binary
+*.mov binary
+*.webm binary
+*.zip binary
+*.msi binary
+*.exe binary

@@ -2529,6 +2529,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",
@@ -2543,6 +2544,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "uuid",
+ "windows 0.61.3",
  "zip",
 ]
 

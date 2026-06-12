@@ -41,3 +41,25 @@
   height: 2px;
   background: var(--accent);
 }
+
+.tabs-spacer {
+  flex: 1 1 auto;
+}
+
+.shutdown-button {
+  -webkit-app-region: no-drag;
+  align-self: center;
+  height: 34px;
+  min-width: 96px;
+  margin-left: 12px;
+  border-color: color-mix(in srgb, var(--danger) 70%, var(--border));
+  background: color-mix(in srgb, var(--danger) 18%, var(--bg-sidebar));
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.shutdown-button:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: white;
+}

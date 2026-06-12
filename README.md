@@ -1,91 +1,178 @@
 # Media Buddy
 
-A native Windows desktop app for searching, downloading, and managing stock
-media (photos and videos) from Pixabay, Pexels, and Unsplash. Tauri 2 +
-SolidJS frontend, Rust + axum backend.
+![License: MIT](https://img.shields.io/github/license/aivrar/mediabuddy)
+![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue)
+![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131)
+![Rust](https://img.shields.io/badge/backend-Rust-orange)
+![SolidJS](https://img.shields.io/badge/frontend-SolidJS%20%2B%20TypeScript-2c4f7c)
+![No Python](https://img.shields.io/badge/Python-not%20required-success)
+![Stars](https://img.shields.io/github/stars/aivrar/mediabuddy)
+![Issues](https://img.shields.io/github/issues/aivrar/mediabuddy)
+![Last Commit](https://img.shields.io/github/last-commit/aivrar/mediabuddy)
 
-Originally a Python (Tkinter) app called ImageBuddy; this is the rewrite that
-removes Python entirely and ships as a single ~10 MB compiled `.exe`.
+**Portable Windows media library builder for stock photos and videos, with local
+downloads, metadata, REST automation, and Florence-2 AI captioning.**
 
-## What it does
+Media Buddy is a native Windows desktop app for searching, downloading,
+organizing, previewing, and AI-captioning stock photos and videos from Pixabay,
+Pexels, and Unsplash.
 
-- **Multi-source search** — Pixabay + Pexels + Unsplash in parallel, returns
-  rich metadata (author, page URL, all URL tiers, view/like/download counts,
-  AI-generated flag, blur hash, color, EXIF where available).
-- **Photos and videos** — search either, or both. Videos download as `.mp4`
-  with the provider's poster as the thumbnail.
-- **Library** — SQLite (WAL mode) with URL deduplication and soft-delete
-  blocking so deleted items aren't re-downloaded next time.
-- **Batch operations** — multi-select then download, batch-delete, etc.
-- **Live system footer** — CPU, RAM, and per-GPU stats (NVIDIA via NVML).
-- **REST API** — built-in axum server with the same JSON shape as the
-  original Python ImageBuddy API. 17 functional routes; 10 vision-related
-  routes are stubbed pending the Florence-2 ONNX integration.
-- **No Python runtime** — single `.exe`, ~10 MB.
+It is a Tauri 2 + SolidJS + Rust rewrite of the original Python ImageBuddy app.
+There is no Python runtime requirement.
 
-## Build from source
+## Screenshots
 
-Requires:
-- Windows 10 / 11
-- [Rust](https://rustup.rs/) (1.85+)
-- [Node.js](https://nodejs.org/) (20+)
-- Microsoft C++ Build Tools (Visual Studio 2022 Community or the standalone
-  build tools)
+| Search | Library | Settings |
+| --- | --- | --- |
+| <img src="docs/screenshots/search.png" alt="Search tab" width="320"> | <img src="docs/screenshots/library.png" alt="Library tab" width="320"> | <img src="docs/screenshots/settings.png" alt="Settings tab" width="320"> |
 
-```powershell
-git clone <this-repo>
-cd MediaBuddy
-npm install
-npm run tauri dev      # development with hot reload
-npm run tauri build    # release build → src-tauri/target/release/mediabuddy.exe
+| Filters | Video Preview | API |
+| --- | --- | --- |
+| <img src="docs/screenshots/filters.png" alt="Search filters" width="320"> | <img src="docs/screenshots/video.png" alt="Video preview" width="320"> | <img src="docs/screenshots/api.png" alt="API tab" width="320"> |
+
+## Highlights
+
+- Multi-source search across Pixabay, Pexels, and Unsplash.
+- Photo and video support, including preview posters for videos.
+- Persistent search topics with per-provider cursors.
+- Batch downloads with concurrency controls.
+- Local library backed by SQLite WAL mode.
+- Rich metadata capture where providers expose it.
+- Large image/video inspector with editable caption and tags.
+- Florence-2 ONNX AI vision for captions and object tags.
+- Dynamic GPU/CPU worker planning for Florence-2.
+- Built-in REST API for automation with bearer-token security.
+- Portable data folder beside the executable.
+
+## Download And Run
+
+For normal users, publish the NSIS installer from:
+
+```text
+src-tauri/target/release/bundle/nsis/Media Buddy_0.1.0_x64-setup.exe
 ```
 
-Release builds use LTO + a single codegen unit (slower compile, smaller +
-faster binary).
+For portable testing, share:
 
-## Configuration
-
-API keys for Pixabay / Pexels / Unsplash are entered in the **Settings** tab
-and persisted to `data/config/settings.json`. The data directory lives next
-to the `.exe` (or in development, under `src-tauri/target/debug/data/`). To
-override the location, set `MEDIABUDDY_DATA_DIR`.
-
-## Folder layout
-
+```text
+mediabuddy.exe
 ```
-data/
-├── config/         settings.json, theme.json
-├── images/
-│   ├── originals/  full-resolution photos
-│   └── thumbs/     300px JPEG thumbnails
-├── videos/
-│   ├── originals/  downloaded .mp4
-│   └── thumbs/     poster JPEGs
-├── logs/           reserved for file-based logs
-├── models/         reserved for Florence-2 ONNX weights
-├── images.db       SQLite database (WAL)
-└── images.db-shm / images.db-wal
+
+When launched, the portable executable creates a sibling `data/` folder for
+settings, downloads, logs, the SQLite library, and Florence-2 model/runtime
+cache.
+
+## First Run
+
+1. Open **Settings**.
+2. Use **Get key** beside Pixabay, Pexels, and Unsplash to create provider API
+   keys.
+3. Paste each key and press **Test & save**.
+4. Open **Images -> Search** and run a query.
+5. Select result cards and choose **Download selected** or **Download all**.
+6. Open **Images -> Library** to inspect, tag, delete, or AI-caption saved
+   media.
+
+## AI Vision
+
+Florence-2 is not bundled in the executable. When you press **Load**, Media
+Buddy downloads the required ONNX model and runtime files into:
+
+```text
+data/models/
 ```
+
+GPU workers are used when compatible. CPU workers are used only for CPU mode or
+as fallback when GPU planning/loading fails.
 
 ## REST API
 
-Mounted in-process when the user starts it from the **API** tab (default
-`127.0.0.1:5000`). All responses use:
+The API tab starts a local REST server, defaulting to:
 
-```json
-{ "success": true|false, "data": {...}, "error": "..." }
+```text
+http://127.0.0.1:5000
 ```
 
-Full route list visible in the API tab. Highlights:
+Use the API tab to copy the bearer token, open live docs, and copy example curl
+commands. The status endpoint is public; other `/api/v1/*` routes require the
+token when one is configured.
 
-- `GET  /api/v1/status`
-- `GET  /api/v1/stats`
-- `GET  /api/v1/images?page=1&per_page=50&source=Pixabay&kind=video`
-- `POST /api/v1/search` — `{ "query": "sunset", "sources": { "pixabay": 2 }, "kind": "both" }`
-- `POST /api/v1/download` — single URL with metadata
-- `POST /api/v1/download/batch` — async, returns `task_id`
-- `GET  /api/v1/tasks/{task_id}` — async task status
+## Documentation
+
+- Wiki pages: [docs/wiki/Home.md](docs/wiki/Home.md)
+- PDF-ready manual: [docs/MEDIA_BUDDY_MANUAL.md](docs/MEDIA_BUDDY_MANUAL.md)
+- PDF export notes: [docs/PDF_EXPORT.md](docs/PDF_EXPORT.md)
+- Screenshot checklist: [docs/wiki/Screenshot-Checklist.md](docs/wiki/Screenshot-Checklist.md)
+- Release checklist: [docs/wiki/Release-Checklist.md](docs/wiki/Release-Checklist.md)
+- Release notes: [docs/RELEASE_NOTES_0.1.0.md](docs/RELEASE_NOTES_0.1.0.md)
+- Security policy: [SECURITY.md](SECURITY.md)
+
+## Build From Source
+
+Requirements:
+
+- Windows 10 or 11
+- Rust stable
+- Node.js 20+
+- Microsoft C++ Build Tools / Visual Studio 2022 Build Tools
+- WebView2 Runtime, usually already present on Windows 10/11
+
+```powershell
+# Clone this repository, then:
+cd ImageBuddy
+npm install
+npm run tauri dev
+npm run tauri build
+```
+
+Release executable:
+
+```text
+src-tauri/target/release/mediabuddy.exe
+```
+
+Installers:
+
+```text
+src-tauri/target/release/bundle/nsis/Media Buddy_0.1.0_x64-setup.exe
+src-tauri/target/release/bundle/msi/Media Buddy_0.1.0_x64_en-US.msi
+```
+
+## Data Layout
+
+```text
+data/
+|-- config/
+|   `-- settings.json
+|-- images/
+|   |-- originals/
+|   `-- thumbs/
+|-- videos/
+|   |-- originals/
+|   `-- thumbs/
+|-- logs/
+|-- models/
+|-- images.db
+|-- images.db-shm
+`-- images.db-wal
+```
+
+Override the data location with:
+
+```powershell
+$env:MEDIABUDDY_DATA_DIR = "D:\MediaBuddyData"
+```
+
+## Privacy
+
+Media Buddy stores provider keys and the REST token locally in
+`data/config/settings.json`. Downloads, metadata, logs, model files, and the
+SQLite library stay local unless you share the folder yourself.
+
+Search/download/API calls go to the configured providers and local REST API
+clients. Florence-2 model/runtime downloads come from Hugging Face, Microsoft
+ONNX Runtime, NuGet, and PyPI for cuDNN runtime files.
 
 ## License
 
-MIT.
+MIT. See [LICENSE](LICENSE).

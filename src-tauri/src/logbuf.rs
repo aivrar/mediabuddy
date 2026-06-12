@@ -32,7 +32,7 @@ impl LogBuffer {
         let buf = self.inner.read().unwrap();
         buf.iter()
             .filter(|e| level_ord(&e.level) >= min_ord)
-            .filter(|e| since.map_or(true, |s| e.timestamp >= s))
+            .filter(|e| since.is_none_or(|s| e.timestamp >= s))
             .cloned()
             .collect()
     }
@@ -72,7 +72,8 @@ impl tracing::field::Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = value.to_string();
         } else {
-            self.fields.push((field.name().to_string(), value.to_string()));
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
         }
     }
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {

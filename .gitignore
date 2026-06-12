@@ -11,6 +11,12 @@ src-tauri/gen/
 data/
 src-tauri/data/
 
+# Local secrets
+.env
+.env.*
+*.key
+*.pem
+
 # Logs
 *.log
 

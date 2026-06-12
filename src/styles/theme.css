@@ -1,7 +1,6 @@
 /*
  * Dark palette ported from core/theme.py (the original Python theme).
- * Same color values, exposed as CSS custom properties.
- * A future light theme just swaps these on :root[data-theme="light"].
+ * Themes swap the same CSS custom properties under :root[data-theme="..."].
  */
 
 :root,
@@ -100,4 +99,152 @@
 
   --tooltip-bg: #333333;
   --tooltip-fg: #ffffff;
+}
+
+:root[data-theme="graphite"] {
+  --bg-main: #181a1b;
+  --bg-card: #26292b;
+  --bg-sidebar: #202325;
+  --bg-input: #34383a;
+  --bg-hover: #303638;
+  --bg-selected: #374042;
+
+  --text-primary: #f0f2ee;
+  --text-secondary: #c0c6c0;
+  --text-hint: #9aa39c;
+  --text-disabled: #70786f;
+
+  --accent: #52b7a5;
+  --accent-dark: #398d7f;
+  --accent-light: #213d39;
+
+  --success: #82c77c;
+  --success-dark: #61a95b;
+  --warning: #e6bd67;
+  --warning-dark: #c99733;
+  --danger: #f07872;
+  --danger-dark: #d65d58;
+  --info: #6db8e8;
+
+  --border: #454a4c;
+  --border-light: #353b3d;
+  --border-dark: #5a6163;
+  --separator: #383e40;
+
+  --scrollbar-bg: #222527;
+  --scrollbar-fg: #51595b;
+
+  --tooltip-bg: #f0f2ee;
+  --tooltip-fg: #181a1b;
+}
+
+:root[data-theme="forest"] {
+  --bg-main: #1b211c;
+  --bg-card: #293229;
+  --bg-sidebar: #222a23;
+  --bg-input: #384338;
+  --bg-hover: #324032;
+  --bg-selected: #3d4b3d;
+
+  --text-primary: #edf2e8;
+  --text-secondary: #c4cdbc;
+  --text-hint: #9ea892;
+  --text-disabled: #707a68;
+
+  --accent: #8fbd63;
+  --accent-dark: #6f9847;
+  --accent-light: #2f4428;
+
+  --success: #9fcb73;
+  --success-dark: #7ca94f;
+  --warning: #e2b867;
+  --warning-dark: #c4933a;
+  --danger: #ed8272;
+  --danger-dark: #d4675c;
+  --info: #7db6c7;
+
+  --border: #465246;
+  --border-light: #384438;
+  --border-dark: #5d6a5b;
+  --separator: #3d493d;
+
+  --scrollbar-bg: #232b24;
+  --scrollbar-fg: #566153;
+
+  --tooltip-bg: #edf2e8;
+  --tooltip-fg: #1b211c;
+}
+
+:root[data-theme="violet"] {
+  --bg-main: #201d24;
+  --bg-card: #2e2934;
+  --bg-sidebar: #28242d;
+  --bg-input: #3c3644;
+  --bg-hover: #393141;
+  --bg-selected: #463e50;
+
+  --text-primary: #eeeaf3;
+  --text-secondary: #c9c1d0;
+  --text-hint: #a89db0;
+  --text-disabled: #766d7d;
+
+  --accent: #b090d8;
+  --accent-dark: #8d6db8;
+  --accent-light: #372d45;
+
+  --success: #87c68a;
+  --success-dark: #68a96b;
+  --warning: #e4be73;
+  --warning-dark: #bd9446;
+  --danger: #f08487;
+  --danger-dark: #d8666a;
+  --info: #83b7df;
+
+  --border: #4b4353;
+  --border-light: #3c3543;
+  --border-dark: #61586a;
+  --separator: #413949;
+
+  --scrollbar-bg: #28232d;
+  --scrollbar-fg: #5a5064;
+
+  --tooltip-bg: #eeeaf3;
+  --tooltip-fg: #201d24;
+}
+
+:root[data-theme="high-contrast"] {
+  --bg-main: #050505;
+  --bg-card: #111111;
+  --bg-sidebar: #0a0a0a;
+  --bg-input: #1e1e1e;
+  --bg-hover: #2a2a2a;
+  --bg-selected: #333333;
+
+  --text-primary: #ffffff;
+  --text-secondary: #e0e0e0;
+  --text-hint: #c2c2c2;
+  --text-disabled: #8a8a8a;
+
+  --accent: #4db3ff;
+  --accent-dark: #1687dc;
+  --accent-light: #08263a;
+
+  --success: #77e083;
+  --success-dark: #45b952;
+  --warning: #ffd166;
+  --warning-dark: #e6a800;
+  --danger: #ff6f69;
+  --danger-dark: #de3e38;
+  --info: #4db3ff;
+
+  --border: #777777;
+  --border-light: #444444;
+  --border-dark: #9a9a9a;
+  --separator: #555555;
+
+  --scrollbar-bg: #111111;
+  --scrollbar-fg: #777777;
+
+  --tooltip-bg: #ffffff;
+  --tooltip-fg: #050505;
 }

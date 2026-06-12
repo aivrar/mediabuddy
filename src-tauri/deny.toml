@@ -1,0 +1,46 @@
+# cargo-deny configuration — supply-chain gate for the Rust backend.
+#
+# Run locally / in CI:
+#   cargo install cargo-deny
+#   cargo deny check
+#
+# Builds should also pass `--locked` so Cargo.lock is honored exactly:
+#   cargo build --release --locked
+#
+# This addresses the audit findings on dependency posture (no audit gate,
+# unpinned ranges). Note: `ort` is currently a prerelease (2.0.0-rc.10);
+# move to a stable release when one is published (tracked separately).
+
+[advisories]
+version = 2
+# Fail on any crate with an open RUSTSEC advisory or that has been yanked.
+yanked = "deny"
+ignore = []
+
+[bans]
+# Surface accidental duplicate versions (bloat / inconsistent patching).
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "OpenSSL",
+]
+
+[sources]
+# Only allow crates from crates.io; reject unknown registries / git sources.
+unknown-registry = "deny"
+unknown-git = "deny"

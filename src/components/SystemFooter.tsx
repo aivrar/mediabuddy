@@ -60,7 +60,7 @@ const SystemFooter: Component = () => {
           fallback={
             <span class="stat">
               <span class="stat-label">GPU</span>
-              <span class="stat-value">{error() ? "n/a" : "no NVIDIA"}</span>
+              <span class="stat-value">{error() ? "n/a" : "no GPU"}</span>
             </span>
           }
         >

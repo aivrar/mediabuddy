@@ -1,4 +1,11 @@
-import { createSignal, onCleanup, onMount, type Component } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+  type Component,
+} from "solid-js";
 import { getThumbUrl } from "../lib/thumbCache";
 
 type Props = {
@@ -15,11 +22,13 @@ const LibraryThumb: Component<Props> = (props) => {
 
   const load = async () => {
     if (loaded) return;
+    const id = props.id;
     loaded = true;
     try {
-      setUrl(await getThumbUrl(props.id));
+      const nextUrl = await getThumbUrl(id);
+      if (props.id === id) setUrl(nextUrl);
     } catch {
-      setError(true);
+      if (props.id === id) setError(true);
     }
   };
 
@@ -38,6 +47,20 @@ const LibraryThumb: Component<Props> = (props) => {
     );
     observer.observe(imgEl);
   });
+
+  createEffect(
+    on(
+      () => props.id,
+      () => {
+        loaded = false;
+        setUrl(null);
+        setError(false);
+        if (imgEl && imgEl.isConnected) void load();
+      },
+      { defer: true }
+    )
+  );
+
   onCleanup(() => observer?.disconnect());
 
   return (

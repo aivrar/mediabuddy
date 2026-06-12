@@ -41,6 +41,51 @@ fn init_schema(conn: &Connection) -> Result<()> {
             source TEXT,
             deleted_at TEXT DEFAULT (datetime('now'))
         );
+
+        -- Persistent search topic. A topic is one user-curated exploration
+        -- of a query+filters combination. Reusing the same query/filters
+        -- looks up the existing topic so pagination cursors carry across
+        -- sessions.
+        CREATE TABLE IF NOT EXISTS topics (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            query TEXT NOT NULL,
+            filters_json TEXT NOT NULL DEFAULT '{}',
+            kind TEXT NOT NULL DEFAULT 'photo',
+            enabled_sources TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_fetched_at TEXT,
+            UNIQUE(query, filters_json, kind)
+        );
+
+        -- Pagination cursor for one (topic, source, media_kind). The next
+        -- "Get more" round fetches `next_page` from each cursor that is
+        -- still 'ok'. Cursors flip to 'empty' once a fetch returns zero
+        -- new items so we stop calling them.
+        CREATE TABLE IF NOT EXISTS topic_cursors (
+            topic_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            media_kind TEXT NOT NULL,
+            next_page INTEGER NOT NULL DEFAULT 1,
+            total_seen INTEGER NOT NULL DEFAULT 0,
+            last_status TEXT NOT NULL DEFAULT 'pending',
+            last_fetched_at TEXT,
+            PRIMARY KEY (topic_id, source, media_kind)
+        );
+
+        -- Every (source, source_id) we've shown to the user under this
+        -- topic, whether or not they downloaded it. Lets a follow-up
+        -- search skip results we already evaluated.
+        CREATE TABLE IF NOT EXISTS topic_seen (
+            topic_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (topic_id, source, source_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_topic_seen_topic ON topic_seen(topic_id);
+        CREATE INDEX IF NOT EXISTS idx_topic_cursors_topic ON topic_cursors(topic_id);
         "#,
     )?;
     Ok(())

@@ -52,10 +52,76 @@
   font-size: var(--font-small-size);
 }
 
+.settings-warning {
+  background: color-mix(in srgb, var(--warning, #f2c94c) 14%, transparent);
+  border-left: 3px solid var(--warning, #f2c94c);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--font-small-size);
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
   gap: 16px;
+  align-items: start;
+}
+
+.settings-grid > .settings-section:nth-of-type(1) {
+  order: 1;
+}
+
+.settings-grid > .settings-section:nth-of-type(2) {
+  order: 4;
+}
+
+.settings-grid > .settings-section:nth-of-type(3) {
+  order: 3;
+}
+
+.settings-grid > .settings-section:nth-of-type(4) {
+  order: 2;
+}
+
+.settings-grid > .settings-section:nth-of-type(2) .section-body {
+  gap: 8px;
+}
+
+.settings-guide {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.settings-guide-item {
+  min-width: 0;
+  border-left: 2px solid var(--accent);
+  padding-left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-guide-item strong,
+.section-intro strong,
+.key-provider-name {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settings-guide-item span,
+.section-intro span,
+.key-provider-help {
+  color: var(--text-secondary);
+  font-size: var(--font-small-size);
+  line-height: 1.45;
 }
 
 .settings-section {
@@ -78,6 +144,15 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.section-intro {
+  border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  padding-left: 10px;
+  margin-bottom: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .field {
@@ -128,4 +203,233 @@
   font-size: var(--font-small-size);
   margin: 0;
   max-width: 60ch;
+}
+
+.vision-runtime {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border-left: 3px solid var(--text-disabled);
+}
+.vision-runtime > div:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.vision-runtime.loaded {
+  border-left-color: var(--success);
+}
+.vision-state {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.vision-runtime.loaded .vision-state {
+  color: var(--success);
+}
+.vision-meta {
+  color: var(--text-secondary);
+  font-size: var(--font-small-size);
+  margin-top: 2px;
+}
+.vision-path {
+  color: var(--text-hint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  margin-top: 5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vision-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 1 auto;
+}
+.vision-actions button {
+  min-width: 68px;
+}
+
+.vision-detail-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vision-detail-list span {
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  width: 100%;
+}
+.key-field-block {
+  border-top: 1px solid var(--separator);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.key-field-block:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.key-field-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.key-field-head > div:first-child {
+  min-width: 0;
+}
+.key-provider-name {
+  margin-bottom: 2px;
+}
+.key-provider-help {
+  margin: 0;
+  max-width: 68ch;
+}
+.provider-link-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.provider-link-btn {
+  min-width: 66px;
+  padding: 6px 10px;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.key-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.key-test-btn {
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 0 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.key-test-btn[data-state="valid"] {
+  background: var(--success);
+  color: var(--bg-main);
+  border-color: transparent;
+}
+.key-test-btn[data-state="invalid"] {
+  background: color-mix(in srgb, var(--danger) 80%, transparent);
+  color: white;
+  border-color: transparent;
+}
+
+.key-probe {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+.key-probe[data-state="valid"] {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  border-left: 2px solid var(--success);
+  color: var(--text-primary);
+}
+.key-probe[data-state="invalid"] {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border-left: 2px solid var(--danger);
+  color: var(--text-primary);
+}
+.key-probe-meta {
+  color: var(--text-hint);
+  font-size: 10.5px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.key-probe-action {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.key-probe-meta span::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--text-hint);
+}
+.key-probe-meta span:first-child::before {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .field {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .key-field-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .provider-link-actions {
+    justify-content: flex-start;
+  }
+
+  .vision-runtime,
+  .key-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vision-runtime > div:first-child {
+    flex: 0 1 auto;
+  }
+
+  .vision-actions {
+    width: 100%;
+  }
+
+  .vision-actions button {
+    flex: 1 1 0;
+  }
 }
