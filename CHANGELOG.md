@@ -2,6 +2,57 @@
 
 All notable changes to Media Buddy are tracked here.
 
+## 0.2.1 - 2026-11-11
+
+### Changed
+
+- **Captions of unknown origin are now protected.** A caption with no recorded
+  origin (everything saved by 0.1.0 that could not be classified) is no longer
+  replaced by Replace short or Overwrite. A new **Keep unknown** option, on by
+  default, controls this; REST: `protect_unknown`. In 0.2.0 these captions
+  were replaceable, which could overwrite text typed by hand in 0.1.0.
+- REST: `overwrite` and `short` analysis no longer replace captions with an
+  empty `caption_source` unless `protect_unknown` is `false`.
+
+### Added
+
+- **Replaced captions are kept.** When an AI run replaces a caption, the old
+  text and its origin stay with the item. The inspector shows it as **Replaced
+  caption** with a **Restore** button; REST: `caption_previous`,
+  `caption_previous_source`, `POST /api/v1/images/{id}/caption/restore`.
+  Restore swaps the two captions, and a second AI caption never pushes out a
+  saved provider or hand-typed one.
+- **Origins recovered on upgrade.** The first time this version opens a
+  library, captions with no recorded origin are marked **provider** when they
+  still match what the provider sent, and **typed by hand** when they differ on
+  an item that was never AI analyzed. No caption text is changed; anything
+  that cannot be proven stays "not recorded".
+- **Mark as mine** in the inspector records a "not recorded" caption as typed
+  by hand without changing it.
+- The run summary says how many captions were kept because they were typed by
+  hand or have no recorded origin. REST results carry `caption_kept_reason`.
+- REST clients can state who wrote a caption: `caption_source` on
+  `PUT /api/v1/images/{id}` (also on its own, to label an existing caption),
+  `POST /api/v1/download` and `POST /api/v1/combo/download-analyze`.
+
+### Fixed
+
+- Text typed in the inspector's tags box while a save was still in flight was
+  replaced when the save finished.
+- For a video saved without a poster, the library loaded the whole video file
+  into memory to use as a thumbnail and then showed a broken-image mark. It
+  now shows a plain tile and loads nothing.
+- Tags a provider repeats were stored repeatedly.
+- When the folder beside the exe could not be used for data, an empty `data`
+  folder tree could be left there before falling back to the per-user folder.
+
+### Upgrade notes
+
+- The library database is upgraded in place the first time this version opens
+  it, from 0.1.0 or 0.2.0. Back up `data/` first if you may want to go back.
+- If you ran Replace short or Overwrite in 0.2.0 on captions saved by 0.1.0,
+  the replaced text was not kept by that version and cannot be recovered.
+
 ## 0.2.0 - 2026-11-10
 
 ### Added

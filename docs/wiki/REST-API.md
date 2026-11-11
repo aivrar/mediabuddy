@@ -52,12 +52,27 @@ token is changed, the discovery file is updated straight away.
 | GET | `/api/v1/images/{id}/file` | Serve original file. |
 | GET | `/api/v1/images/{id}/thumb` | Serve thumbnail/poster. |
 | POST | `/api/v1/images/query` | Query/filter media. |
+| POST | `/api/v1/images/{id}/caption/restore` | Put back the caption an AI run replaced. |
 | GET | `/api/v1/blocked` | Count of deleted items that are blocked. |
 | DELETE | `/api/v1/blocked` | Clear the blocked list. |
 
 Media rows include `caption_source` (`provider`, `ai`, `manual`, or empty when
-there is no caption or its origin was never recorded). A caption set with
-`PUT /api/v1/images/{id}` is recorded as `manual`.
+there is no caption or its origin was never recorded).
+
+A caption set with `PUT /api/v1/images/{id}` is recorded as `manual`. A client
+that is not a person can say so by sending `caption_source` (`ai` or
+`provider`) with the caption. `caption_source` can also be sent on its own to
+label the caption an item already has, for example to claim a caption with no
+recorded origin as `manual`. Any other value is rejected with HTTP 400.
+
+`POST /api/v1/download` and `POST /api/v1/combo/download-analyze` accept the
+same `caption_source` for the `alt` text they are given; it defaults to
+`provider`.
+
+Media rows also include `caption_previous` and `caption_previous_source`: the
+caption an AI run last replaced, and its origin. `POST
+/api/v1/images/{id}/caption/restore` swaps it with the current caption and
+returns the row. It returns HTTP 409 when there is nothing to restore.
 
 The file endpoints stream the file and honor `Range` requests (HTTP 206), so
 large videos can be fetched in pieces.
@@ -110,9 +125,26 @@ failed; the cursor does not move, so the same page is fetched next time.
 | POST | `/api/v1/vision/analyze` | Analyze images by path or batch request. |
 
 Analysis requests accept `caption_mode` (`missing`, `short`, `overwrite`,
-`skip`), `caption_min_chars`, and `protect_manual` (default `true`: captions
-with `caption_source` `manual` are never replaced). The result reports
-`caption_written`, `caption_source`, and `tags_added`.
+`skip`), `caption_min_chars`, and two protections that both default to `true`:
+
+- `protect_manual`: captions with `caption_source` `manual` are never replaced.
+- `protect_unknown`: captions with an empty `caption_source` (origin never
+  recorded) are never replaced.
+
+The result reports `caption_written`, `caption_source`, `caption_previous`,
+`tags_added`, and `caption_kept_reason`, which is null when the caption was
+written and otherwise one of:
+
+| Value | Meaning |
+| --- | --- |
+| `mode` | The caption mode leaves this caption alone. |
+| `manual` | The mode would replace it, but it was typed by hand. |
+| `unknown_origin` | The mode would replace it, but its origin was never recorded. |
+| `tags_only` | The caption mode is `skip`. |
+| `nothing_generated` | Florence-2 produced no caption text. |
+
+Changed in 0.2.1: `overwrite` and `short` no longer replace captions with an
+empty `caption_source` unless `protect_unknown` is `false`.
 
 `POST /api/v1/vision/unload` returns HTTP 409 while an analysis job is running.
 

@@ -7,8 +7,8 @@ Unsplash.
 The app is designed to run as a normal desktop tool or as a portable executable
 with all app data stored beside the exe.
 
-Current version: **0.2.0**. Download it from the
-[v0.2.0 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.0), or see
+Current version: **0.2.1**. Download it from the
+[v0.2.1 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.1), or see
 [all releases](https://github.com/aivrar/mediabuddy/releases).
 
 ## Main Features
@@ -20,8 +20,9 @@ Current version: **0.2.0**. Download it from the
 - Local library with editable captions and tags.
 - Large image and video preview.
 - Florence-2 ONNX AI vision for captions and object tags.
-- Caption origin tracking (provider, AI, or typed by hand), with hand-typed
-  captions protected from AI runs by default.
+- Caption origin tracking (provider, AI, or typed by hand). Hand-typed
+  captions and captions of unknown origin are protected from AI runs by
+  default, and a caption an AI run replaces is kept and can be restored.
 - Dynamic GPU/CPU vision worker planning.
 - Local REST API for automation.
 - Local settings, logs, models, and database.

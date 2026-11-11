@@ -1022,6 +1022,7 @@ mod tests {
             ai_generated: None,
             created_at_provider: None,
             source_data: serde_json::json!({}),
+            caption_source: None,
         }
     }
 

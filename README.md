@@ -23,7 +23,7 @@ computer vision for captions and object tags.
 It is a Tauri 2 + SolidJS + Rust rewrite of the original Python ImageBuddy app.
 There is no Python runtime requirement.
 
-**Current version: [0.2.0](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.0)** · [What's new](docs/RELEASE_NOTES_0.2.0.md) ·
+**Current version: [0.2.1](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.1)** · [What's new](docs/RELEASE_NOTES_0.2.1.md) ·
 [All releases](https://github.com/aivrar/mediabuddy/releases)
 
 ## Screenshots
@@ -47,22 +47,24 @@ There is no Python runtime requirement.
 - Rich metadata capture where providers expose it.
 - Large image/video inspector with editable caption and tags.
 - Florence-2 ONNX AI vision for captions and object tags.
-- Every caption records who wrote it (provider, AI, or typed by hand), and
-  captions typed by hand are protected from AI runs by default.
+- Every caption records who wrote it (provider, AI, or typed by hand).
+  Captions typed by hand, and captions whose origin is unknown, are protected
+  from AI runs by default.
+- A caption an AI run replaces is kept and can be restored.
 - Dynamic GPU/CPU worker planning for Florence-2.
 - Built-in REST API for automation with bearer-token security.
 - Portable data folder beside the executable.
 
 ## Download And Run
 
-Download version 0.2.0 from the
-[v0.2.0 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.0):
+Download version 0.2.1 from the
+[v0.2.1 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.1):
 
 | File | Use it for |
 | --- | --- |
-| [Media.Buddy_0.2.0_x64-setup.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64-setup.exe) | Installer. Recommended for most people. |
-| [Media.Buddy_0.2.0_x64_en-US.msi](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64_en-US.msi) | MSI package, for environments that prefer MSI. |
-| [mediabuddy.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/mediabuddy.exe) | Portable. No install; keeps its data beside the exe. |
+| [Media.Buddy_0.2.1_x64-setup.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.1/Media.Buddy_0.2.1_x64-setup.exe) | Installer. Recommended for most people. |
+| [Media.Buddy_0.2.1_x64_en-US.msi](https://github.com/aivrar/mediabuddy/releases/download/v0.2.1/Media.Buddy_0.2.1_x64_en-US.msi) | MSI package, for environments that prefer MSI. |
+| [mediabuddy.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.1/mediabuddy.exe) | Portable. No install; keeps its data beside the exe. |
 
 The [latest release](https://github.com/aivrar/mediabuddy/releases/latest) link always points at the newest version.
 
@@ -71,9 +73,9 @@ settings, downloads, logs, the SQLite library, and Florence-2 model/runtime
 cache. If that folder cannot be written to (for example an install under
 `C:\Program Files`), data goes to `%LOCALAPPDATA%\MediaBuddy\data` instead.
 
-Upgrading from 0.1.0: the library database is upgraded in place the first time
-0.2.0 opens it. Going back to 0.1.0 afterwards is not supported, so back up
-`data/` first if you may want to.
+Upgrading: the library database is upgraded in place the first time a newer
+version opens it. Going back to an older version afterwards is not supported,
+so back up `data/` first if you may want to.
 
 ## First Run
 
@@ -118,7 +120,8 @@ token when one is configured.
 - PDF export notes: [docs/PDF_EXPORT.md](docs/PDF_EXPORT.md)
 - Screenshot checklist: [docs/wiki/Screenshot-Checklist.md](docs/wiki/Screenshot-Checklist.md)
 - Release checklist: [docs/wiki/Release-Checklist.md](docs/wiki/Release-Checklist.md)
-- Release notes: [0.2.0](docs/RELEASE_NOTES_0.2.0.md),
+- Release notes: [0.2.1](docs/RELEASE_NOTES_0.2.1.md),
+  [0.2.0](docs/RELEASE_NOTES_0.2.0.md),
   [0.1.0](docs/RELEASE_NOTES_0.1.0.md)
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - Security policy: [SECURITY.md](SECURITY.md)
@@ -150,8 +153,8 @@ src-tauri/target/release/mediabuddy.exe
 Installers:
 
 ```text
-src-tauri/target/release/bundle/nsis/Media Buddy_0.2.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/Media Buddy_0.2.0_x64_en-US.msi
+src-tauri/target/release/bundle/nsis/Media Buddy_0.2.1_x64-setup.exe
+src-tauri/target/release/bundle/msi/Media Buddy_0.2.1_x64_en-US.msi
 ```
 
 ## Data Layout

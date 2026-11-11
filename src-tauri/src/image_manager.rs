@@ -9,8 +9,8 @@ use crate::db;
 use crate::error::{AppError, Result};
 use crate::paths::AppPaths;
 use crate::types::{
-    DeleteResult, Image, NewImage, CAPTION_SOURCE_AI, CAPTION_SOURCE_MANUAL,
-    CAPTION_SOURCE_PROVIDER,
+    is_known_caption_source, DeleteResult, Image, NewImage, CAPTION_SOURCE_AI,
+    CAPTION_SOURCE_MANUAL, CAPTION_SOURCE_PROVIDER,
 };
 use crate::vision::CaptionPolicy;
 
@@ -46,8 +46,21 @@ pub struct ImageManager {
 #[derive(Debug, Clone)]
 pub struct VisionApplyOutcome {
     pub caption_written: bool,
+    /// Why the generated caption was not stored (`CaptionDecision::kept_reason`);
+    /// `None` when it was.
+    pub caption_kept_reason: Option<&'static str>,
     pub tags_added: Vec<String>,
     pub image: Image,
+}
+
+/// Result of putting back the caption an AI run replaced.
+#[derive(Debug, Clone)]
+pub enum RestoreOutcome {
+    Restored(Box<Image>),
+    /// The item has no replaced caption on record.
+    NothingToRestore,
+    /// The item no longer exists.
+    NotFound,
 }
 
 /// Merge detected-object labels into an existing tag list, case-insensitively.
@@ -203,14 +216,20 @@ impl ImageManager {
 
     pub fn add_image(&self, new: &NewImage) -> Result<Image> {
         let id = Uuid::new_v4().to_string();
-        let tags_json = serde_json::to_string(&new.tags)?;
+        // Providers sometimes repeat a tag; keep the first of each.
+        let (tags, _) = merge_label_tags(&new.tags, &[]);
+        let tags_json = serde_json::to_string(&tags)?;
         let urls_json = serde_json::to_string(&new.urls)?;
         let source_data_json = serde_json::to_string(&new.source_data)?;
-        // Whatever caption arrives with a download is the provider's.
+        // Whatever caption arrives with a download is the provider's, unless
+        // the caller (a REST client supplying its own text) says otherwise.
         let caption_source = if new.alt.trim().is_empty() {
             ""
         } else {
-            CAPTION_SOURCE_PROVIDER
+            match new.caption_source.as_deref().map(str::trim) {
+                Some(given) if is_known_caption_source(given) => given,
+                _ => CAPTION_SOURCE_PROVIDER,
+            }
         };
         let downloaded_at = {
             let conn = self.lock_conn();
@@ -304,7 +323,9 @@ impl ImageManager {
             query: new.query.clone(),
             alt: new.alt.clone(),
             caption_source: caption_source.to_string(),
-            tags: new.tags.clone(),
+            caption_previous: String::new(),
+            caption_previous_source: String::new(),
+            tags,
             color: new.color.clone(),
             blur_hash: new.blur_hash.clone(),
             author_name: new.author_name.clone(),
@@ -350,8 +371,31 @@ impl ImageManager {
         alt: Option<String>,
         tags: Option<Vec<String>>,
     ) -> Result<Option<Image>> {
+        self.update_image_metadata_as(id, alt, tags, None)
+    }
+
+    /// Like [`Self::update_image_metadata`], with the caption's origin stated
+    /// by the caller. `origin` must be a known origin; it is applied to the
+    /// caption the row ends up with, whether or not the text changed, which
+    /// is how a "not recorded" caption gets claimed as hand-written. It is
+    /// ignored when the row ends up with no caption.
+    pub fn update_image_metadata_as(
+        &self,
+        id: &str,
+        alt: Option<String>,
+        tags: Option<Vec<String>>,
+        origin: Option<&str>,
+    ) -> Result<Option<Image>> {
+        let origin = origin.map(str::trim);
+        if let Some(value) = origin {
+            if !is_known_caption_source(value) {
+                return Err(AppError::other(format!(
+                    "unknown caption_source '{value}' (expected provider, ai or manual)"
+                )));
+            }
+        }
         let conn = self.lock_conn();
-        if alt.is_none() && tags.is_none() {
+        if alt.is_none() && tags.is_none() && origin.is_none() {
             return select_image(&conn, id);
         }
         let tags_json = match &tags {
@@ -365,15 +409,16 @@ impl ImageManager {
             r#"
             UPDATE images SET
                 caption_source = CASE
+                    WHEN trim(COALESCE(?2, alt, '')) = '' THEN ''
+                    WHEN ?5 IS NOT NULL THEN ?5
                     WHEN ?2 IS NULL OR ?2 = COALESCE(alt, '') THEN caption_source
-                    WHEN trim(?2) = '' THEN ''
                     ELSE ?4
                 END,
                 alt = COALESCE(?2, alt),
                 tags = COALESCE(?3, tags)
             WHERE id = ?1
             "#,
-            params![id, alt, tags_json, CAPTION_SOURCE_MANUAL],
+            params![id, alt, tags_json, CAPTION_SOURCE_MANUAL, origin],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -418,12 +463,25 @@ impl ImageManager {
         };
 
         let caption = caption.trim();
-        let caption_written = policy.should_write(&current_alt, &current_source, caption);
+        let decision = policy.decide(&current_alt, &current_source, caption);
+        let caption_written = decision.is_write();
         let current_tags: Vec<String> =
             serde_json::from_str(&current_tags_json).unwrap_or_default();
         let (merged_tags, tags_added) = merge_label_tags(&current_tags, labels);
 
         if caption_written {
+            // Keep the text being replaced so the replacement can be undone.
+            // One AI caption replacing another must not push out a saved
+            // caption that a provider or a person wrote, so an AI caption
+            // only takes the slot when the slot is empty.
+            if !current_alt.trim().is_empty() && current_alt.trim() != caption {
+                tx.execute(
+                    "UPDATE images SET caption_previous = ?2, caption_previous_source = ?3
+                     WHERE id = ?1
+                       AND (?3 <> ?4 OR trim(COALESCE(caption_previous, '')) = '')",
+                    params![id, current_alt, current_source, CAPTION_SOURCE_AI],
+                )?;
+            }
             tx.execute(
                 "UPDATE images SET alt = ?2, caption_source = ?3 WHERE id = ?1",
                 params![id, caption, CAPTION_SOURCE_AI],
@@ -444,9 +502,57 @@ impl ImageManager {
 
         Ok(image.map(|image| VisionApplyOutcome {
             caption_written,
+            caption_kept_reason: decision.kept_reason(),
             tags_added,
             image,
         }))
+    }
+
+    /// Put back the caption an AI run replaced. The caption it displaces
+    /// takes the "previous" slot, so restoring twice returns to where you
+    /// started and no text is lost either way.
+    pub fn restore_previous_caption(&self, id: &str) -> Result<RestoreOutcome> {
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        let current = tx
+            .query_row(
+                "SELECT COALESCE(alt, ''), COALESCE(caption_source, ''),
+                        COALESCE(caption_previous, ''), COALESCE(caption_previous_source, '')
+                 FROM images WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((alt, source, previous, previous_source)) = current else {
+            return Ok(RestoreOutcome::NotFound);
+        };
+        if previous.trim().is_empty() {
+            return Ok(RestoreOutcome::NothingToRestore);
+        }
+        let (displaced, displaced_source) = if alt.trim().is_empty() {
+            (String::new(), String::new())
+        } else {
+            (alt, source)
+        };
+        tx.execute(
+            "UPDATE images SET alt = ?2, caption_source = ?3,
+                               caption_previous = ?4, caption_previous_source = ?5
+             WHERE id = ?1",
+            params![id, previous, previous_source, displaced, displaced_source],
+        )?;
+        let image = select_image(&tx, id)?;
+        tx.commit()?;
+        Ok(match image {
+            Some(image) => RestoreOutcome::Restored(Box::new(image)),
+            None => RestoreOutcome::NotFound,
+        })
     }
 
     /// Add tags to an item without replacing the ones it has. The merge runs
@@ -564,9 +670,9 @@ impl ImageManager {
     }
 }
 
-const IMAGE_COLUMNS: &str = "id, filename, path, thumb_path, url, source, query, width, height, alt, tags, preview_only, downloaded_at, vision_processed, source_id, kind, source_page_url, urls, duration_secs, file_size, color, blur_hash, author_name, author_url, author_avatar, views, downloads, likes, comments, ai_generated, created_at_provider, source_data, caption_source";
+const IMAGE_COLUMNS: &str = "id, filename, path, thumb_path, url, source, query, width, height, alt, tags, preview_only, downloaded_at, vision_processed, source_id, kind, source_page_url, urls, duration_secs, file_size, color, blur_hash, author_name, author_url, author_avatar, views, downloads, likes, comments, ai_generated, created_at_provider, source_data, caption_source, caption_previous, caption_previous_source";
 
-const SELECT_ALL_SQL: &str = "SELECT id, filename, path, thumb_path, url, source, query, width, height, alt, tags, preview_only, downloaded_at, vision_processed, source_id, kind, source_page_url, urls, duration_secs, file_size, color, blur_hash, author_name, author_url, author_avatar, views, downloads, likes, comments, ai_generated, created_at_provider, source_data, caption_source FROM images ORDER BY downloaded_at DESC";
+const SELECT_ALL_SQL: &str = "SELECT id, filename, path, thumb_path, url, source, query, width, height, alt, tags, preview_only, downloaded_at, vision_processed, source_id, kind, source_page_url, urls, duration_secs, file_size, color, blur_hash, author_name, author_url, author_avatar, views, downloads, likes, comments, ai_generated, created_at_provider, source_data, caption_source, caption_previous, caption_previous_source FROM images ORDER BY downloaded_at DESC";
 
 fn select_image(conn: &Connection, id: &str) -> Result<Option<Image>> {
     let sql = format!("SELECT {IMAGE_COLUMNS} FROM images WHERE id = ?1");
@@ -606,6 +712,8 @@ fn image_from_row(r: &Row<'_>) -> rusqlite::Result<Image> {
         height: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
         alt: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
         caption_source: r.get::<_, Option<String>>(32)?.unwrap_or_default(),
+        caption_previous: r.get::<_, Option<String>>(33)?.unwrap_or_default(),
+        caption_previous_source: r.get::<_, Option<String>>(34)?.unwrap_or_default(),
         tags,
         preview_only: r.get::<_, i64>(11)? != 0,
         downloaded_at: r.get(12)?,
@@ -676,6 +784,7 @@ mod tests {
             ai_generated: None,
             created_at_provider: None,
             source_data: json!({}),
+            caption_source: None,
         }
     }
 
@@ -684,6 +793,7 @@ mod tests {
             mode,
             min_chars: 80,
             protect_manual: true,
+            protect_unknown: true,
         }
     }
 
@@ -765,6 +875,233 @@ mod tests {
         assert_eq!(saved.caption_source, CAPTION_SOURCE_PROVIDER);
 
         assert!(mgr.append_tags("missing", &["x".into()]).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Make a row look like one saved before origins were tracked.
+    fn forget_origin(mgr: &ImageManager, id: &str) {
+        mgr.lock_conn()
+            .execute("UPDATE images SET caption_source = '' WHERE id = ?1", [id])
+            .unwrap();
+    }
+
+    #[test]
+    fn captions_of_unknown_origin_are_kept_until_allowed() {
+        let (mgr, root) = temp_manager("unknown");
+        let img = mgr
+            .add_image(&new_image(
+                "https://x.test/a.jpg",
+                "Old caption",
+                "photo",
+                "1",
+            ))
+            .unwrap();
+        forget_origin(&mgr, &img.id);
+
+        for mode in [CaptionWriteMode::ReplaceShort, CaptionWriteMode::Overwrite] {
+            let out = mgr
+                .apply_vision_result(
+                    &img.id,
+                    "A generated caption",
+                    &["Tree".into()],
+                    &policy(mode),
+                )
+                .unwrap()
+                .unwrap();
+            assert!(!out.caption_written);
+            assert_eq!(out.caption_kept_reason, Some("unknown_origin"));
+            assert_eq!(out.image.alt, "Old caption");
+            assert_eq!(out.image.caption_source, "");
+            assert_eq!(out.image.caption_previous, "");
+            // The rest of the result is still applied.
+            assert!(out.image.vision_processed);
+            assert!(out.image.tags.contains(&"Tree".to_string()));
+        }
+
+        // Explicitly allowed: replaced, and the old text is kept.
+        let mut allow = policy(CaptionWriteMode::Overwrite);
+        allow.protect_unknown = false;
+        let out = mgr
+            .apply_vision_result(&img.id, "A generated caption", &[], &allow)
+            .unwrap()
+            .unwrap();
+        assert!(out.caption_written);
+        assert_eq!(out.caption_kept_reason, None);
+        assert_eq!(out.image.alt, "A generated caption");
+        assert_eq!(out.image.caption_source, CAPTION_SOURCE_AI);
+        assert_eq!(out.image.caption_previous, "Old caption");
+        assert_eq!(out.image.caption_previous_source, "");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replaced_captions_are_kept_and_can_be_restored() {
+        let (mgr, root) = temp_manager("restore");
+        let img = mgr
+            .add_image(&new_image(
+                "https://x.test/a.jpg",
+                "From the provider",
+                "photo",
+                "1",
+            ))
+            .unwrap();
+        let overwrite = policy(CaptionWriteMode::Overwrite);
+
+        assert!(matches!(
+            mgr.restore_previous_caption(&img.id).unwrap(),
+            RestoreOutcome::NothingToRestore
+        ));
+        assert!(matches!(
+            mgr.restore_previous_caption("missing").unwrap(),
+            RestoreOutcome::NotFound
+        ));
+
+        let out = mgr
+            .apply_vision_result(&img.id, "First AI caption", &[], &overwrite)
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.image.caption_previous, "From the provider");
+        assert_eq!(out.image.caption_previous_source, CAPTION_SOURCE_PROVIDER);
+
+        // A second AI caption must not push the provider's text out, and
+        // regenerating the same text changes nothing.
+        for text in ["Second AI caption", "Second AI caption"] {
+            let out = mgr
+                .apply_vision_result(&img.id, text, &[], &overwrite)
+                .unwrap()
+                .unwrap();
+            assert_eq!(out.image.alt, "Second AI caption");
+            assert_eq!(out.image.caption_previous, "From the provider");
+            assert_eq!(out.image.caption_previous_source, CAPTION_SOURCE_PROVIDER);
+        }
+
+        // Restore swaps: the provider's text comes back with its origin and
+        // the AI caption takes the slot, so nothing is lost and it can be undone.
+        let RestoreOutcome::Restored(restored) = mgr.restore_previous_caption(&img.id).unwrap()
+        else {
+            panic!("expected a restore");
+        };
+        assert_eq!(restored.alt, "From the provider");
+        assert_eq!(restored.caption_source, CAPTION_SOURCE_PROVIDER);
+        assert_eq!(restored.caption_previous, "Second AI caption");
+        assert_eq!(restored.caption_previous_source, CAPTION_SOURCE_AI);
+        let RestoreOutcome::Restored(back) = mgr.restore_previous_caption(&img.id).unwrap() else {
+            panic!("expected a restore");
+        };
+        assert_eq!(back.alt, "Second AI caption");
+        assert_eq!(back.caption_source, CAPTION_SOURCE_AI);
+        assert_eq!(back.caption_previous, "From the provider");
+
+        // A hand edit leaves the saved caption in place...
+        let edited = mgr
+            .update_image_metadata(&img.id, Some("Typed over the AI".into()), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.caption_previous, "From the provider");
+        // ...and when an AI run is allowed to replace the hand edit, the hand
+        // edit is what gets kept.
+        let mut open = policy(CaptionWriteMode::Overwrite);
+        open.protect_manual = false;
+        let out = mgr
+            .apply_vision_result(&img.id, "Third AI caption", &[], &open)
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.image.caption_previous, "Typed over the AI");
+        assert_eq!(out.image.caption_previous_source, CAPTION_SOURCE_MANUAL);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn caption_origin_can_be_stated_by_the_caller() {
+        let (mgr, root) = temp_manager("stated");
+        let img = mgr
+            .add_image(&new_image(
+                "https://x.test/a.jpg",
+                "Old caption",
+                "photo",
+                "1",
+            ))
+            .unwrap();
+        forget_origin(&mgr, &img.id);
+
+        // Claim an unrecorded caption as hand-written without changing it.
+        let claimed = mgr
+            .update_image_metadata_as(&img.id, None, None, Some("manual"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.alt, "Old caption");
+        assert_eq!(claimed.caption_source, CAPTION_SOURCE_MANUAL);
+        assert_eq!(claimed.tags, vec!["sky"]);
+
+        // A writer that is not a person can say so.
+        let scripted = mgr
+            .update_image_metadata_as(
+                &img.id,
+                Some("Written by a script".into()),
+                None,
+                Some("ai"),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(scripted.caption_source, CAPTION_SOURCE_AI);
+
+        // Unknown values are refused, and nothing is changed.
+        assert!(mgr
+            .update_image_metadata_as(&img.id, Some("x".into()), None, Some("robot"))
+            .is_err());
+        assert_eq!(
+            mgr.get_image_by_id(&img.id).unwrap().unwrap().alt,
+            "Written by a script"
+        );
+
+        // No caption, no origin.
+        let cleared = mgr
+            .update_image_metadata_as(&img.id, Some(String::new()), None, Some("manual"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.caption_source, "");
+        let still = mgr
+            .update_image_metadata_as(&img.id, None, None, Some("manual"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.caption_source, "");
+
+        // Repeated tags from a provider are stored once.
+        let mut repeats = new_image("https://x.test/tags.jpg", "", "photo", "9");
+        repeats.tags = vec![
+            "london".into(),
+            "night".into(),
+            "London".into(),
+            " night ".into(),
+        ];
+        assert_eq!(
+            mgr.add_image(&repeats).unwrap().tags,
+            vec!["london", "night"]
+        );
+
+        // Downloads: the provider unless the caller says otherwise.
+        let mut own = new_image(
+            "https://x.test/b.jpg",
+            "Sent with the download",
+            "photo",
+            "2",
+        );
+        own.caption_source = Some("manual".into());
+        assert_eq!(
+            mgr.add_image(&own).unwrap().caption_source,
+            CAPTION_SOURCE_MANUAL
+        );
+        let mut odd = new_image(
+            "https://x.test/c.jpg",
+            "Sent with the download",
+            "photo",
+            "3",
+        );
+        odd.caption_source = Some("robot".into());
+        assert_eq!(
+            mgr.add_image(&odd).unwrap().caption_source,
+            CAPTION_SOURCE_PROVIDER
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -34,8 +34,8 @@ npm run tauri build -- --bundles nsis,msi
 Attach:
 
 ```text
-src-tauri/target/release/bundle/nsis/Media Buddy_0.2.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/Media Buddy_0.2.0_x64_en-US.msi
+src-tauri/target/release/bundle/nsis/Media Buddy_0.2.1_x64-setup.exe
+src-tauri/target/release/bundle/msi/Media Buddy_0.2.1_x64_en-US.msi
 src-tauri/target/release/mediabuddy.exe
 ```
 
@@ -43,8 +43,8 @@ GitHub replaces the spaces in uploaded file names with dots, so the download
 links use:
 
 ```text
-Media.Buddy_0.2.0_x64-setup.exe
-Media.Buddy_0.2.0_x64_en-US.msi
+Media.Buddy_0.2.1_x64-setup.exe
+Media.Buddy_0.2.1_x64_en-US.msi
 ```
 
 ## Hashes
@@ -53,8 +53,8 @@ Generate hashes:
 
 ```powershell
 Get-FileHash "src-tauri\target\release\mediabuddy.exe" -Algorithm SHA256
-Get-FileHash "src-tauri\target\release\bundle\nsis\Media Buddy_0.2.0_x64-setup.exe" -Algorithm SHA256
-Get-FileHash "src-tauri\target\release\bundle\msi\Media Buddy_0.2.0_x64_en-US.msi" -Algorithm SHA256
+Get-FileHash "src-tauri\target\release\bundle\nsis\Media Buddy_0.2.1_x64-setup.exe" -Algorithm SHA256
+Get-FileHash "src-tauri\target\release\bundle\msi\Media Buddy_0.2.1_x64_en-US.msi" -Algorithm SHA256
 ```
 
 ## GitHub Release Notes

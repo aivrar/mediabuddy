@@ -284,15 +284,41 @@ async fn update_image(
     id: String,
     alt: Option<String>,
     tags: Option<Vec<String>>,
+    caption_source: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<Image>, String> {
     // Returns the row as saved (with its caption origin), or `None` if the
-    // item no longer exists.
+    // item no longer exists. `caption_source` states who wrote the caption
+    // (used to claim a "not recorded" caption as hand-written).
     let mgr = state.image_manager.clone();
-    tokio::task::spawn_blocking(move || mgr.update_image_metadata(&id, alt, tags))
+    tokio::task::spawn_blocking(move || {
+        mgr.update_image_metadata_as(&id, alt, tags, caption_source.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// Put back the caption an AI run replaced. Returns the saved row, or `None`
+/// if the item no longer exists; errors when there is nothing to restore.
+#[tauri::command]
+async fn restore_previous_caption(
+    id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Image>, String> {
+    use crate::image_manager::RestoreOutcome;
+    let mgr = state.image_manager.clone();
+    let outcome = tokio::task::spawn_blocking(move || mgr.restore_previous_caption(&id))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    match outcome {
+        RestoreOutcome::Restored(image) => Ok(Some(*image)),
+        RestoreOutcome::NotFound => Ok(None),
+        RestoreOutcome::NothingToRestore => {
+            Err("This item has no previous caption to restore.".into())
+        }
+    }
 }
 
 /// Add tags to an item, merging into the tags stored right now rather than
@@ -439,6 +465,9 @@ pub struct VisionAnalyzeParams {
     /// Keep captions a person wrote, whatever the mode. Defaults to true.
     #[serde(default)]
     protect_manual: Option<bool>,
+    /// Keep captions whose origin was never recorded. Defaults to true.
+    #[serde(default)]
+    protect_unknown: Option<bool>,
     #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
@@ -460,6 +489,10 @@ pub struct VisionAnalyzeItem {
     pub error: Option<String>,
     pub caption: Option<String>,
     pub caption_written: bool,
+    /// Why the generated caption was not stored: "mode", "manual",
+    /// "unknown_origin", "tags_only" or "nothing_generated". `None` when it
+    /// was stored, or when the item failed or was skipped.
+    pub caption_kept_reason: Option<String>,
     pub tags_added: Vec<String>,
     pub objects: Vec<crate::vision::DetectedObject>,
     pub image: Option<Image>,
@@ -620,6 +653,7 @@ async fn vision_analyze_images(
         mode: caption_mode,
         min_chars: params.caption_min_chars.unwrap_or(80).clamp(1, 1000),
         protect_manual: params.protect_manual.unwrap_or(true),
+        protect_unknown: params.protect_unknown.unwrap_or(true),
     };
     let caption_task = (caption_mode != CaptionWriteMode::Skip)
         .then(|| caption_task_from_name(params.caption_task.as_deref()).to_string());
@@ -629,12 +663,13 @@ async fn vision_analyze_images(
         .unwrap_or(max_concurrency)
         .clamp(1, max_concurrency);
     tracing::info!(
-        "Florence-2 analysis started: {} image(s), concurrency {}, detect_objects={}, caption_mode={}, protect_manual={}, caption_task={}",
+        "Florence-2 analysis started: {} image(s), concurrency {}, detect_objects={}, caption_mode={}, protect_manual={}, protect_unknown={}, caption_task={}",
         ids.len(),
         concurrency,
         detect_objects,
         caption_mode.as_str(),
         caption_policy.protect_manual,
+        caption_policy.protect_unknown,
         caption_task.as_deref().unwrap_or("none")
     );
 
@@ -665,6 +700,7 @@ async fn vision_analyze_images(
                     error: Some(format!("analysis worker failed: {e}")),
                     caption: None,
                     caption_written: false,
+                    caption_kept_reason: None,
                     tags_added: Vec::new(),
                     objects: Vec::new(),
                     image: None,
@@ -730,6 +766,7 @@ fn analyze_library_image(
                 error: Some("image not found".to_string()),
                 caption: None,
                 caption_written: false,
+                caption_kept_reason: None,
                 tags_added: Vec::new(),
                 objects: Vec::new(),
                 image: None,
@@ -743,6 +780,7 @@ fn analyze_library_image(
                 error: Some(e.to_string()),
                 caption: None,
                 caption_written: false,
+                caption_kept_reason: None,
                 tags_added: Vec::new(),
                 objects: Vec::new(),
                 image: None,
@@ -761,6 +799,7 @@ fn analyze_library_image(
             error: Some("Florence-2 currently analyzes downloaded still images only".to_string()),
             caption: None,
             caption_written: false,
+            caption_kept_reason: None,
             tags_added: Vec::new(),
             objects: Vec::new(),
             image: Some(image),
@@ -777,6 +816,7 @@ fn analyze_library_image(
                 error: Some(e),
                 caption: None,
                 caption_written: false,
+                caption_kept_reason: None,
                 tags_added: Vec::new(),
                 objects: Vec::new(),
                 image: Some(image),
@@ -804,6 +844,7 @@ fn analyze_library_image(
                 error: Some(e.to_string()),
                 caption: None,
                 caption_written: false,
+                caption_kept_reason: None,
                 tags_added: Vec::new(),
                 objects: Vec::new(),
                 image: None,
@@ -818,6 +859,7 @@ fn analyze_library_image(
                 error: Some(format!("Florence-2 analysis panicked: {message}")),
                 caption: None,
                 caption_written: false,
+                caption_kept_reason: None,
                 tags_added: Vec::new(),
                 objects: Vec::new(),
                 image: None,
@@ -842,6 +884,7 @@ fn analyze_library_image(
             error: None,
             caption: Some(caption),
             caption_written: outcome.caption_written,
+            caption_kept_reason: outcome.caption_kept_reason.map(str::to_string),
             tags_added: outcome.tags_added,
             objects: analysis.objects,
             image: Some(outcome.image),
@@ -853,6 +896,7 @@ fn analyze_library_image(
             error: Some("item was deleted while it was being analyzed".to_string()),
             caption: Some(caption),
             caption_written: false,
+            caption_kept_reason: None,
             tags_added: Vec::new(),
             objects: analysis.objects,
             image: None,
@@ -864,6 +908,7 @@ fn analyze_library_image(
             error: Some(e.to_string()),
             caption: Some(caption),
             caption_written: false,
+            caption_kept_reason: None,
             tags_added: Vec::new(),
             objects: analysis.objects,
             image: None,
@@ -933,6 +978,11 @@ async fn read_thumb_bytes(
         .ok_or_else(|| "image not found".to_string())?;
     let rel = if !img.thumb_path.is_empty() {
         img.thumb_path
+    } else if img.kind.eq_ignore_ascii_case("video") {
+        // A video saved without a poster has nothing to show as a thumbnail.
+        // Falling back to the original would read the whole video file into
+        // memory and hand it to the window as if it were an image.
+        return Err("this video has no thumbnail".into());
     } else {
         img.path
     };
@@ -1618,6 +1668,7 @@ pub fn run() {
             delete_images,
             is_url_saved,
             update_image,
+            restore_previous_caption,
             append_image_tags,
             search_images,
             download_images,

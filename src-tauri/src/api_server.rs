@@ -566,6 +566,10 @@ fn build_router(ctx: ApiContext, cors_enabled: bool, bound_loopback: bool) -> Ro
             "/api/v1/blocked",
             get(handle_blocked_status).delete(handle_clear_blocked),
         )
+        .route(
+            "/api/v1/images/{image_id}/caption/restore",
+            post(handle_restore_caption),
+        )
         .route("/api/v1/images/{image_id}/file", get(handle_image_file))
         .route("/api/v1/images/{image_id}/thumb", get(handle_image_thumb))
         .route("/api/v1/images/query", post(handle_query_images))
@@ -895,11 +899,25 @@ fn api_route_docs() -> Vec<ApiRouteDoc> {
         ApiRouteDoc {
             method: "POST",
             path: "/api/v1/vision/analyze/{image_id}",
-            description: "Analyze one library image using caption policy and object detection. Captions with caption_source 'manual' are kept unless protect_manual is false.",
+            description: "Analyze one library image using caption policy and object detection. Captions with caption_source 'manual' are kept unless protect_manual is false; captions with no recorded origin are kept unless protect_unknown is false. The result's caption_kept_reason says why a caption was not written.",
             auth_required: true,
             example_body: Some(
-                json!({"detect_objects": true, "caption_mode": "missing", "caption_task": "detailed", "caption_min_chars": 80, "protect_manual": true}),
+                json!({"detect_objects": true, "caption_mode": "missing", "caption_task": "detailed", "caption_min_chars": 80, "protect_manual": true, "protect_unknown": true}),
             ),
+        },
+        ApiRouteDoc {
+            method: "PUT",
+            path: "/api/v1/images/{image_id}",
+            description: "Update caption (alt) and/or tags. A changed caption is recorded as caption_source 'manual' unless caption_source says 'ai' or 'provider'. caption_source may be sent alone to label the existing caption.",
+            auth_required: true,
+            example_body: Some(json!({"alt": "A caption", "tags": ["one", "two"], "caption_source": "manual"})),
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/api/v1/images/{image_id}/caption/restore",
+            description: "Put back the caption an AI run replaced (caption_previous). The caption it displaces becomes the new caption_previous. 409 when there is nothing to restore.",
+            auth_required: true,
+            example_body: None,
         },
         ApiRouteDoc {
             method: "POST",
@@ -1448,6 +1466,22 @@ struct UpdateImageBody {
     alt: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+    /// Who wrote the caption: "manual" (the default for a changed caption),
+    /// "ai" or "provider". May be sent on its own to label the caption the
+    /// item already has.
+    #[serde(default)]
+    caption_source: Option<String>,
+}
+
+/// 400 for a `caption_source` that is not one of the known origins.
+fn caption_source_error(value: Option<&str>) -> Option<Response> {
+    match value.map(str::trim) {
+        Some(v) if !crate::types::is_known_caption_source(v) => Some(err(
+            StatusCode::BAD_REQUEST,
+            "caption_source must be one of: provider, ai, manual",
+        )),
+        _ => None,
+    }
 }
 
 async fn handle_update_image(
@@ -1455,19 +1489,46 @@ async fn handle_update_image(
     AxumPath(image_id): AxumPath<String>,
     Json(body): Json<UpdateImageBody>,
 ) -> Response {
-    if body.alt.is_none() && body.tags.is_none() {
+    if body.alt.is_none() && body.tags.is_none() && body.caption_source.is_none() {
         return err(StatusCode::BAD_REQUEST, "No updates provided");
     }
+    if let Some(response) = caption_source_error(body.caption_source.as_deref()) {
+        return response;
+    }
     // A caption set here counts as written by a person (caption_source
-    // "manual"), so later AI runs leave it alone unless told otherwise.
+    // "manual") unless the caller says otherwise, so later AI runs leave it
+    // alone unless told to replace it.
     let mgr = ctx.image_manager.clone();
     let updated_res = tokio::task::spawn_blocking(move || {
-        mgr.update_image_metadata(&image_id, body.alt, body.tags)
+        mgr.update_image_metadata_as(
+            &image_id,
+            body.alt,
+            body.tags,
+            body.caption_source.as_deref(),
+        )
     })
     .await;
     match updated_res {
         Ok(Ok(Some(img))) => ok(img),
         Ok(Ok(None)) => err(StatusCode::NOT_FOUND, "Image not found"),
+        Ok(Err(e)) => internal(e),
+        Err(e) => internal(e),
+    }
+}
+
+async fn handle_restore_caption(
+    State(ctx): State<ApiContext>,
+    AxumPath(image_id): AxumPath<String>,
+) -> Response {
+    use crate::image_manager::RestoreOutcome;
+    let mgr = ctx.image_manager.clone();
+    match tokio::task::spawn_blocking(move || mgr.restore_previous_caption(&image_id)).await {
+        Ok(Ok(RestoreOutcome::Restored(image))) => ok(*image),
+        Ok(Ok(RestoreOutcome::NotFound)) => err(StatusCode::NOT_FOUND, "Image not found"),
+        Ok(Ok(RestoreOutcome::NothingToRestore)) => err(
+            StatusCode::CONFLICT,
+            "This item has no previous caption to restore",
+        ),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e),
     }
@@ -2025,6 +2086,9 @@ async fn handle_search_one_source(
 #[derive(Debug, Deserialize)]
 struct DownloadSingleBody {
     url: String,
+    /// Who wrote `alt`: "provider" (default), "manual" or "ai".
+    #[serde(default)]
+    caption_source: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default = "default_api_source")]
@@ -2124,6 +2188,7 @@ fn single_download_result(body: &DownloadSingleBody) -> SearchResult {
     result.urls = body.urls.clone();
     result.tags = body.tags.clone();
     result.alt = body.alt.clone();
+    result.caption_source = body.caption_source.clone();
     result.width = body.width;
     result.height = body.height;
     result.duration_secs = body.duration_secs;
@@ -2155,6 +2220,9 @@ async fn handle_download_single(
     }
     if ctx.image_manager.is_url_saved(&body.url) {
         return err(StatusCode::CONFLICT, "Image already exists");
+    }
+    if let Some(response) = caption_source_error(body.caption_source.as_deref()) {
+        return response;
     }
     let result = single_download_result(&body);
     match downloader::download_one(
@@ -2627,6 +2695,9 @@ struct VisionAnalyzeBody {
     /// Keep captions a person wrote, whatever the mode. Defaults to true.
     #[serde(default)]
     protect_manual: Option<bool>,
+    /// Keep captions whose origin was never recorded. Defaults to true.
+    #[serde(default)]
+    protect_unknown: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -2645,6 +2716,7 @@ fn rest_vision_options(body: &VisionAnalyzeBody) -> RestVisionAnalyzeOptions {
             mode: caption_mode,
             min_chars: body.caption_min_chars.unwrap_or(80).clamp(1, 1000),
             protect_manual: body.protect_manual.unwrap_or(true),
+            protect_unknown: body.protect_unknown.unwrap_or(true),
         },
         caption_task: (caption_mode != CaptionWriteMode::Skip)
             .then(|| caption_task_from_name(body.caption_task.as_deref()).to_string()),
@@ -2736,8 +2808,14 @@ struct VisionAnalyzeOutput {
     caption: String,
     /// Whether the generated caption replaced the stored one.
     caption_written: bool,
+    /// Why the generated caption was not stored: "mode", "manual",
+    /// "unknown_origin", "tags_only" or "nothing_generated". Null when it was.
+    caption_kept_reason: Option<&'static str>,
     /// Origin of the caption now stored: provider | ai | manual | "".
     caption_source: String,
+    /// The caption this or an earlier AI run replaced, if any. Restore it
+    /// with POST /api/v1/images/{id}/caption/restore.
+    caption_previous: String,
     tags_added: Vec<String>,
     objects: Vec<DetectedObject>,
 }
@@ -2843,7 +2921,9 @@ async fn analyze_image_by_id(
         image_id,
         caption: result.caption,
         caption_written: outcome.caption_written,
+        caption_kept_reason: outcome.caption_kept_reason,
         caption_source: outcome.image.caption_source,
+        caption_previous: outcome.image.caption_previous,
         tags_added: outcome.tags_added,
         objects: result.objects,
     })
@@ -3170,6 +3250,9 @@ async fn handle_combo_search_download(
 #[derive(Deserialize)]
 struct ComboDownloadAnalyzeBody {
     url: String,
+    /// Who wrote `alt`: "provider" (default), "manual" or "ai".
+    #[serde(default)]
+    caption_source: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default = "default_api_source")]
@@ -3194,6 +3277,9 @@ struct ComboDownloadAnalyzeBody {
     caption_min_chars: Option<usize>,
     #[serde(default)]
     protect_manual: Option<bool>,
+    /// Keep captions whose origin was never recorded. Defaults to true.
+    #[serde(default)]
+    protect_unknown: Option<bool>,
     #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
@@ -3210,6 +3296,7 @@ struct WorkflowAnalyzeInput {
     caption_task: Option<String>,
     caption_min_chars: Option<usize>,
     protect_manual: Option<bool>,
+    protect_unknown: Option<bool>,
 }
 
 fn workflow_options(
@@ -3228,6 +3315,7 @@ fn workflow_options(
         caption_task: analyze.caption_task,
         caption_min_chars: analyze.caption_min_chars,
         protect_manual: analyze.protect_manual,
+        protect_unknown: analyze.protect_unknown,
     };
     VisionWorkflowOptions {
         analyze: rest_vision_options(&body),
@@ -3243,6 +3331,7 @@ fn download_body_to_search_result(body: &ComboDownloadAnalyzeBody) -> SearchResu
     result.url = body.url.clone();
     result.tags = body.tags.clone();
     result.alt = body.alt.clone();
+    result.caption_source = body.caption_source.clone();
     result
 }
 
@@ -3265,6 +3354,9 @@ async fn handle_combo_download_analyze(
     if ctx.image_manager.is_url_saved(&body.url) {
         return err(StatusCode::CONFLICT, "Image already exists");
     }
+    if let Some(response) = caption_source_error(body.caption_source.as_deref()) {
+        return response;
+    }
     let task_id = ctx.tasks.create("download_analyze", 2).await;
     let task_id_for_spawn = task_id.clone();
     let tasks = ctx.tasks.clone();
@@ -3277,6 +3369,7 @@ async fn handle_combo_download_analyze(
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
             protect_manual: body.protect_manual,
+            protect_unknown: body.protect_unknown,
         },
         body.load_if_needed,
         body.unload_after,
@@ -3365,6 +3458,9 @@ struct ComboAnalyzeBody {
     caption_min_chars: Option<usize>,
     #[serde(default)]
     protect_manual: Option<bool>,
+    /// Keep captions whose origin was never recorded. Defaults to true.
+    #[serde(default)]
+    protect_unknown: Option<bool>,
     #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
@@ -3420,6 +3516,7 @@ async fn handle_combo_analyze_unprocessed(
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
             protect_manual: body.protect_manual,
+            protect_unknown: body.protect_unknown,
         },
         body.load_if_needed,
         body.unload_after,
@@ -3452,6 +3549,7 @@ async fn handle_combo_smart_analyze(
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
             protect_manual: body.protect_manual,
+            protect_unknown: body.protect_unknown,
         },
         Some(true),
         body.unload_after,
@@ -3494,6 +3592,9 @@ struct ComboSearchDownloadAnalyzeBody {
     caption_min_chars: Option<usize>,
     #[serde(default)]
     protect_manual: Option<bool>,
+    /// Keep captions whose origin was never recorded. Defaults to true.
+    #[serde(default)]
+    protect_unknown: Option<bool>,
     #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
@@ -3533,6 +3634,7 @@ async fn handle_combo_search_download_analyze(
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
             protect_manual: body.protect_manual,
+            protect_unknown: body.protect_unknown,
         },
         body.load_if_needed,
         body.unload_after,
@@ -3680,6 +3782,8 @@ mod tests {
             query: "sunset beach".into(),
             alt: String::new(),
             caption_source: String::new(),
+            caption_previous: String::new(),
+            caption_previous_source: String::new(),
             tags: vec!["beach".into(), "warm".into()],
             color: None,
             blur_hash: None,

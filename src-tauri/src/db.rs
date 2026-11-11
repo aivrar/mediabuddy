@@ -145,6 +145,77 @@ fn migrate_data(conn: &Connection) -> Result<()> {
         tx.commit()?;
         conn.pragma_update(None, "user_version", 1)?;
     }
+    if version < 2 {
+        recover_caption_origins(conn)?;
+        conn.pragma_update(None, "user_version", 2)?;
+    }
+    Ok(())
+}
+
+/// v2: work out who wrote captions saved before origins were tracked, but
+/// only where it can be proven from what is stored. Everything else stays
+/// "not recorded".
+///
+/// Each downloaded item keeps the provider's raw record. If the caption
+/// still equals what that record yields, the provider wrote it. If it
+/// differs and the item was never AI-analyzed, only a person's edit can have
+/// changed it: before origins were tracked, the AI write and the "analyzed"
+/// flag were set by the same UPDATE, so an unanalyzed item cannot carry an
+/// AI caption. A caption that differs on an analyzed item could be the AI's
+/// or a later hand edit, so it is left alone.
+fn recover_caption_origins(conn: &Connection) -> Result<()> {
+    use crate::types::{CAPTION_SOURCE_MANUAL, CAPTION_SOURCE_PROVIDER};
+
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(String, String, String, String, i64, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, COALESCE(source, ''), COALESCE(kind, 'photo'), alt,
+                    COALESCE(vision_processed, 0), COALESCE(source_data, '{}')
+             FROM images
+             WHERE trim(COALESCE(alt, '')) <> '' AND COALESCE(caption_source, '') = ''",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    let (mut from_provider, mut by_hand) = (0usize, 0usize);
+    let examined = rows.len();
+    for (id, source, kind, alt, vision_processed, source_data) in rows {
+        let record: serde_json::Value =
+            serde_json::from_str(&source_data).unwrap_or(serde_json::Value::Null);
+        let Some(original) = crate::search::provider_caption(&source, &kind, &record) else {
+            continue;
+        };
+        let origin = if original.trim() == alt.trim() {
+            from_provider += 1;
+            CAPTION_SOURCE_PROVIDER
+        } else if vision_processed == 0 {
+            by_hand += 1;
+            CAPTION_SOURCE_MANUAL
+        } else {
+            continue;
+        };
+        tx.execute(
+            "UPDATE images SET caption_source = ?2
+             WHERE id = ?1 AND COALESCE(caption_source, '') = ''",
+            rusqlite::params![id, origin],
+        )?;
+    }
+    tx.commit()?;
+    if examined > 0 {
+        tracing::info!(
+            "caption origins: {examined} caption(s) had none recorded; {from_provider} matched the provider's text, {by_hand} were edited by hand, {} could not be determined",
+            examined - from_provider - by_hand
+        );
+    }
     Ok(())
 }
 
@@ -179,6 +250,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         // Items consumed from the provider so far. Lets the page size change
         // between rounds without skipping results (NULL on older rows).
         "ALTER TABLE topic_cursors ADD COLUMN item_offset INTEGER",
+        // The caption an AI run last replaced, and its origin, so a
+        // replacement can be undone.
+        "ALTER TABLE images ADD COLUMN caption_previous TEXT DEFAULT ''",
+        "ALTER TABLE images ADD COLUMN caption_previous_source TEXT DEFAULT ''",
     ];
     for sql in migrations {
         // Ignore "duplicate column" errors so migrations are idempotent.
@@ -240,6 +315,107 @@ mod tests {
             .unwrap();
         let rows = stmt.query_map([topic], |r| r.get::<_, String>(0)).unwrap();
         rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn caption_origins_are_recovered_only_where_provable() {
+        let dir = std::env::temp_dir().join(format!(
+            "mediabuddy-dbtest-origins-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("images.db");
+        let pexels = r#"{"id": 1, "alt": "A red kite over a hill", "src": {}}"#;
+        let pixabay_no_caption = r#"{"id": 5, "tags": "sea, sky"}"#;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(LEGACY_SCHEMA).unwrap();
+            // 0.1.0 added this column to the base schema on first open.
+            conn.execute_batch("ALTER TABLE images ADD COLUMN source_data TEXT DEFAULT '{}'")
+                .unwrap();
+            let insert = |id: &str, source: &str, alt: &str, analyzed: i64, record: &str| {
+                conn.execute(
+                    "INSERT INTO images (id, url, source, query, alt, source_id, kind, vision_processed, source_data)
+                     VALUES (?1, ?2, ?3, 'q', ?4, ?1, 'photo', ?5, ?6)",
+                    rusqlite::params![
+                        id,
+                        format!("https://x.test/{id}.jpg"),
+                        source,
+                        alt,
+                        analyzed,
+                        record
+                    ],
+                )
+                .unwrap();
+            };
+            // Still the provider's text, analyzed or not.
+            insert("same", "Pexels", "A red kite over a hill", 0, pexels);
+            insert(
+                "same-analyzed",
+                "Pexels",
+                " A red kite over a hill ",
+                1,
+                pexels,
+            );
+            // Differs and never analyzed: only a person can have changed it.
+            insert("edited", "Pexels", "My own words", 0, pexels);
+            insert("typed", "Pixabay", "I wrote this", 0, pixabay_no_caption);
+            // Differs on an analyzed item: the AI's or a later hand edit.
+            insert("unclear", "Pexels", "Something else entirely", 1, pexels);
+            // No provider record to compare against.
+            insert("no-record", "Pexels", "Unknown story", 0, "{}");
+            insert("other-source", "api", "Sent by a script", 0, pexels);
+            // No caption: nothing to label.
+            insert("empty", "Pexels", "", 0, pexels);
+        }
+
+        let origin = |conn: &Connection, id: &str| -> String {
+            conn.query_row(
+                "SELECT caption_source FROM images WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let conn = open(&path).unwrap();
+        assert_eq!(origin(&conn, "same"), "provider");
+        assert_eq!(origin(&conn, "same-analyzed"), "provider");
+        assert_eq!(origin(&conn, "edited"), "manual");
+        assert_eq!(origin(&conn, "typed"), "manual");
+        assert_eq!(origin(&conn, "unclear"), "");
+        assert_eq!(origin(&conn, "no-record"), "");
+        assert_eq!(origin(&conn, "other-source"), "");
+        assert_eq!(origin(&conn, "empty"), "");
+
+        // A library already opened by 0.2.0 (schema version 1) gets the same
+        // treatment, and origins that version did record are never touched.
+        conn.execute(
+            "INSERT INTO images (id, url, source, query, alt, source_id, kind, vision_processed, source_data, caption_source)
+             VALUES ('recorded', 'https://x.test/recorded.jpg', 'Pexels', 'q', 'Generated text', 'recorded', 'photo', 0, ?1, 'ai')",
+            [pexels],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE images SET caption_source = '' WHERE id = 'edited'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        drop(conn);
+        let conn = open(&path).unwrap();
+        assert_eq!(origin(&conn, "recorded"), "ai");
+        assert_eq!(origin(&conn, "edited"), "manual");
+        // The text itself is never changed by this step.
+        let alt: String = conn
+            .query_row(
+                "SELECT alt FROM images WHERE id = 'same-analyzed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alt, " A red kite over a hill ");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -312,7 +488,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         // New table and columns exist.
         conn.execute(
             "INSERT INTO topic_pending (topic_id, source, source_key, result_json) \

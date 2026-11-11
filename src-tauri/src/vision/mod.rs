@@ -125,28 +125,104 @@ pub struct CaptionPolicy {
     pub min_chars: usize,
     /// When true, a caption a person wrote is never replaced, in any mode.
     pub protect_manual: bool,
+    /// When true, a caption whose origin was never recorded is never
+    /// replaced either. Nothing proves such a caption was not typed by hand,
+    /// so replacing it has to be asked for.
+    pub protect_unknown: bool,
+}
+
+/// What a policy decides for one generated caption, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionDecision {
+    /// Store the generated caption.
+    Write,
+    /// The mode is "tags only".
+    TagsOnly,
+    /// Florence-2 produced no caption text.
+    NothingGenerated,
+    /// The mode leaves this caption alone (one exists, or it is long enough).
+    KeptByMode,
+    /// The mode would replace it, but a person wrote it.
+    KeptManual,
+    /// The mode would replace it, but nobody recorded who wrote it.
+    KeptUnknownOrigin,
+}
+
+impl CaptionDecision {
+    pub fn is_write(self) -> bool {
+        self == Self::Write
+    }
+
+    /// Stable name for the reason a caption was not written. `None` when it
+    /// was.
+    pub fn kept_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Write => None,
+            Self::TagsOnly => Some("tags_only"),
+            Self::NothingGenerated => Some("nothing_generated"),
+            Self::KeptByMode => Some("mode"),
+            Self::KeptManual => Some("manual"),
+            Self::KeptUnknownOrigin => Some("unknown_origin"),
+        }
+    }
 }
 
 impl CaptionPolicy {
     /// `existing` / `existing_source` must describe the row as it is at
     /// write time (see `ImageManager::apply_vision_result`).
-    pub fn should_write(&self, existing: &str, existing_source: &str, generated: &str) -> bool {
+    ///
+    /// The mode is consulted first, so the two "kept" reasons that name an
+    /// origin count exactly the captions that protection saved from a mode
+    /// that would otherwise have replaced them.
+    pub fn decide(
+        &self,
+        existing: &str,
+        existing_source: &str,
+        generated: &str,
+    ) -> CaptionDecision {
+        use crate::types::{CAPTION_SOURCE_AI, CAPTION_SOURCE_MANUAL, CAPTION_SOURCE_PROVIDER};
+
+        if self.mode == CaptionWriteMode::Skip {
+            return CaptionDecision::TagsOnly;
+        }
         if generated.trim().is_empty() {
-            return false;
+            return CaptionDecision::NothingGenerated;
         }
         let existing = existing.trim();
-        if self.protect_manual
-            && !existing.is_empty()
-            && existing_source == crate::types::CAPTION_SOURCE_MANUAL
-        {
-            return false;
+        if existing.is_empty() {
+            // Nothing to protect, whatever origin is recorded.
+            return CaptionDecision::Write;
         }
-        match self.mode {
-            CaptionWriteMode::MissingOnly => existing.is_empty(),
+        let mode_replaces = match self.mode {
+            CaptionWriteMode::MissingOnly | CaptionWriteMode::Skip => false,
             CaptionWriteMode::ReplaceShort => existing.chars().count() < self.min_chars,
             CaptionWriteMode::Overwrite => true,
-            CaptionWriteMode::Skip => false,
+        };
+        if !mode_replaces {
+            return CaptionDecision::KeptByMode;
         }
+        match existing_source {
+            CAPTION_SOURCE_PROVIDER | CAPTION_SOURCE_AI => CaptionDecision::Write,
+            CAPTION_SOURCE_MANUAL => {
+                if self.protect_manual {
+                    CaptionDecision::KeptManual
+                } else {
+                    CaptionDecision::Write
+                }
+            }
+            // Empty, or a value this version does not know: not recorded.
+            _ => {
+                if self.protect_unknown {
+                    CaptionDecision::KeptUnknownOrigin
+                } else {
+                    CaptionDecision::Write
+                }
+            }
+        }
+    }
+
+    pub fn should_write(&self, existing: &str, existing_source: &str, generated: &str) -> bool {
+        self.decide(existing, existing_source, generated).is_write()
     }
 }
 
@@ -963,8 +1039,8 @@ fn ensure_ort_initialized(cache_dir: &Path, flavor: RuntimeFlavor) -> Result<Run
 #[cfg(test)]
 mod tests {
     use super::{
-        should_plan_cpu_workers, CaptionPolicy, CaptionWriteMode, VisionExecutionMode,
-        VisionRegistry,
+        should_plan_cpu_workers, CaptionDecision, CaptionPolicy, CaptionWriteMode,
+        VisionExecutionMode, VisionRegistry,
     };
     use std::sync::Arc;
 
@@ -973,7 +1049,72 @@ mod tests {
             mode,
             min_chars: 80,
             protect_manual,
+            protect_unknown: true,
         }
+    }
+
+    #[test]
+    fn captions_of_unknown_origin_need_an_explicit_opt_in() {
+        let short = "Could have been typed by hand";
+        for mode in [CaptionWriteMode::ReplaceShort, CaptionWriteMode::Overwrite] {
+            let mut p = policy(mode, true);
+            // "" is what every caption saved before origins were tracked has.
+            assert_eq!(
+                p.decide(short, "", "generated"),
+                CaptionDecision::KeptUnknownOrigin
+            );
+            // A value this version does not know is not proof of anything.
+            assert_eq!(
+                p.decide(short, "imported", "generated"),
+                CaptionDecision::KeptUnknownOrigin
+            );
+            // Known replaceable origins are unaffected.
+            assert_eq!(
+                p.decide(short, "provider", "generated"),
+                CaptionDecision::Write
+            );
+            assert_eq!(p.decide(short, "ai", "generated"), CaptionDecision::Write);
+            // Switching off manual protection does not switch this one off.
+            p.protect_manual = false;
+            assert_eq!(
+                p.decide(short, "", "generated"),
+                CaptionDecision::KeptUnknownOrigin
+            );
+            p.protect_unknown = false;
+            assert_eq!(p.decide(short, "", "generated"), CaptionDecision::Write);
+        }
+        // An empty caption is always fillable.
+        let p = policy(CaptionWriteMode::MissingOnly, true);
+        assert_eq!(p.decide("  ", "", "generated"), CaptionDecision::Write);
+    }
+
+    #[test]
+    fn kept_reasons_say_what_stopped_the_write() {
+        let long = "x".repeat(120);
+        let missing = policy(CaptionWriteMode::MissingOnly, true);
+        // The mode already leaves it alone: that is the reason, not the origin.
+        assert_eq!(
+            missing.decide("typed", "manual", "g").kept_reason(),
+            Some("mode")
+        );
+        assert_eq!(missing.decide("old", "", "g").kept_reason(), Some("mode"));
+        let short = policy(CaptionWriteMode::ReplaceShort, true);
+        assert_eq!(short.decide(&long, "", "g").kept_reason(), Some("mode"));
+        assert_eq!(
+            short.decide("typed", "manual", "g").kept_reason(),
+            Some("manual")
+        );
+        assert_eq!(
+            short.decide("old", "", "g").kept_reason(),
+            Some("unknown_origin")
+        );
+        assert_eq!(short.decide("old", "provider", "g").kept_reason(), None);
+        assert_eq!(
+            short.decide("old", "provider", " ").kept_reason(),
+            Some("nothing_generated")
+        );
+        let skip = policy(CaptionWriteMode::Skip, true);
+        assert_eq!(skip.decide("", "", "g").kept_reason(), Some("tags_only"));
     }
 
     #[test]
@@ -990,7 +1131,8 @@ mod tests {
 
         let overwrite = policy(CaptionWriteMode::Overwrite, true);
         assert!(overwrite.should_write(&long, "ai", "generated"));
-        assert!(overwrite.should_write(&long, "", "generated"));
+        // Origin not recorded: kept unless explicitly allowed.
+        assert!(!overwrite.should_write(&long, "", "generated"));
 
         let skip = policy(CaptionWriteMode::Skip, false);
         assert!(!skip.should_write("", "", "generated"));

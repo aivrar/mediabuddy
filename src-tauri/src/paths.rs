@@ -50,10 +50,21 @@ impl AppPaths {
             .parent()
             .ok_or_else(|| AppError::other("executable has no parent directory"))?;
         let portable = exe_dir.join("data");
-        let portable_err = match Self::ensure_dirs(&portable) {
-            Ok(paths) if dir_is_writable(&paths.root) => return Ok(paths),
-            Ok(_) => "directory is not writable".to_string(),
-            Err(e) => e.to_string(),
+        // Check before creating anything, so a location that turns out to be
+        // unusable is not left with an empty folder tree.
+        let probe_dir = if portable.is_dir() {
+            portable.as_path()
+        } else {
+            exe_dir
+        };
+        let portable_err = if dir_is_writable(probe_dir) {
+            match Self::ensure_dirs(&portable) {
+                Ok(paths) if dir_is_writable(&paths.root) => return Ok(paths),
+                Ok(_) => "directory is not writable".to_string(),
+                Err(e) => e.to_string(),
+            }
+        } else {
+            "directory is not writable".to_string()
         };
 
         // The executable lives somewhere read-only (a per-machine install

@@ -68,10 +68,18 @@
 
 ## AI Did Not Replace A Caption
 
+- Read the summary shown when the run finishes: it counts the captions kept
+  because they were typed by hand or have no recorded origin.
 - Check **Caption by** in the inspector. A caption typed by hand is kept while
-  **Keep manual** is on.
+  **Keep manual** is on; a "not recorded" caption is kept while **Keep
+  unknown** is on.
 - Check the caption mode: Missing only and Replace short leave longer captions
   alone.
+
+## AI Replaced A Caption I Wanted
+
+- Open the item. The old text is under **Replaced caption**; press
+  **Restore**.
 
 ## The Window Asks Before Closing
 

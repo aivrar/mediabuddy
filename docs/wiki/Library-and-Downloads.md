@@ -12,6 +12,8 @@ For fastest practical use:
 - Watch the log tab for provider errors or throttling.
 - Lower concurrency if a provider starts rate-limiting requests.
 
+Tags a provider repeats are stored once.
+
 Videos are written straight to disk as they download, so large files do not
 take up memory. A preview-only video download saves the poster and metadata
 without fetching the video file.
@@ -51,8 +53,10 @@ Provider captions and tags are saved when available. AI vision can fill missing
 data or supplement tags based on selected options.
 
 The inspector shows who wrote each caption (**Caption by**: provider, AI, typed
-by hand, or not recorded for items saved by older versions). Captions typed by
-hand are kept by AI runs unless **Keep manual** is switched off. See
+by hand, or not recorded). Captions typed by hand are kept by AI runs unless
+**Keep manual** is switched off, and captions with no recorded origin are kept
+unless **Keep unknown** is switched off. When an AI run does replace a caption,
+the old text is kept and the inspector offers **Restore**. See
 [AI Vision Florence-2](AI-Vision-Florence-2.md) for the full rules.
 
 ## Search Results Versus Library Items

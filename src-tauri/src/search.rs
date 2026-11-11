@@ -50,6 +50,11 @@ pub struct SearchResult {
     pub created_at_provider: Option<String>,
 
     pub source_data: Value,
+
+    /// Who wrote `alt`, for callers that supply their own caption (REST
+    /// downloads). `None` means the provider did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_source: Option<String>,
 }
 
 impl SearchResult {
@@ -80,6 +85,7 @@ impl SearchResult {
             ai_generated: None,
             created_at_provider: None,
             source_data: Value::Null,
+            caption_source: None,
         }
     }
 }
@@ -245,6 +251,27 @@ pub fn provider_side_filters(filters: &SearchFilters, source: &str, kind: &str) 
         out.min_height = None;
     }
     out
+}
+
+/// The caption the provider supplied for a saved item, re-derived from the
+/// raw provider record stored with it (`images.source_data`) by the same
+/// mapping used at search time. `None` when there is no usable record (a
+/// REST download, a row from before records were stored) or the provider is
+/// not one of ours, in which case nothing can be said about the caption.
+pub fn provider_caption(source: &str, kind: &str, record: &Value) -> Option<String> {
+    if record.as_object().is_none_or(|fields| fields.is_empty()) {
+        return None;
+    }
+    let video = kind.trim().eq_ignore_ascii_case("video");
+    let item = match (source.trim().to_ascii_lowercase().as_str(), video) {
+        ("pixabay", false) => pixabay_photo_from_hit(record.clone(), ""),
+        ("pixabay", true) => pixabay_video_from_hit(record.clone(), ""),
+        ("pexels", false) => pexels_photo_from(record.clone(), ""),
+        ("pexels", true) => pexels_video_from(record.clone(), ""),
+        ("unsplash", false) => unsplash_photo_from(record.clone(), ""),
+        _ => return None,
+    };
+    Some(item.alt)
 }
 
 /// Transport error for a provider call, with the request URL removed: the
@@ -1265,8 +1292,38 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_local_filters, paginate, provider_side_filters, SearchFilters, SearchResult,
+        apply_local_filters, paginate, provider_caption, provider_side_filters, SearchFilters,
+        SearchResult,
     };
+    use serde_json::json;
+
+    #[test]
+    fn provider_caption_is_rederived_from_the_stored_record() {
+        let pexels = json!({"id": 1, "alt": "A red kite over a hill", "src": {}});
+        assert_eq!(
+            provider_caption("Pexels", "photo", &pexels).as_deref(),
+            Some("A red kite over a hill")
+        );
+        let unsplash = json!({"id": "a", "alt_description": null, "description": "Fallback text"});
+        assert_eq!(
+            provider_caption("Unsplash", "photo", &unsplash).as_deref(),
+            Some("Fallback text")
+        );
+        // A record with no caption field is still a record: the provider gave none.
+        let bare = json!({"id": 5, "tags": "sea, sky"});
+        assert_eq!(
+            provider_caption("Pixabay", "photo", &bare).as_deref(),
+            Some("")
+        );
+        // No record, or a source we do not map: nothing can be said.
+        assert_eq!(provider_caption("Pexels", "photo", &json!({})), None);
+        assert_eq!(
+            provider_caption("Pexels", "photo", &serde_json::Value::Null),
+            None
+        );
+        assert_eq!(provider_caption("api", "photo", &pexels), None);
+        assert_eq!(provider_caption("Unsplash", "video", &unsplash), None);
+    }
 
     #[test]
     fn local_filters_can_be_applied_after_counting_the_page() {

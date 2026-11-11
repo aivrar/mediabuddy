@@ -1694,6 +1694,56 @@
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* Small text-style action that sits inside a line of metadata. */
+.inline-action {
+  margin-left: 8px;
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.5;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  cursor: pointer;
+}
+.inline-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.inline-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The caption an AI run replaced, with a way to put it back. */
+.inspector-previous {
+  padding: 8px;
+  background: color-mix(in srgb, var(--bg-input) 70%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.inspector-previous-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--text-hint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+.inspector-previous-head .inline-action {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+.inspector-previous p {
+  margin: 6px 0 0;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .inspector-edit .vision-options {
   padding: 8px;
   background: color-mix(in srgb, var(--bg-input) 70%, transparent);

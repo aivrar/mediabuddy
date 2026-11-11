@@ -2,25 +2,29 @@
 
 ## Download
 
-Version 0.2.0 is on the [v0.2.0 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.0):
+Version 0.2.1 is on the [v0.2.1 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.1):
 
 | File | Use it for |
 | --- | --- |
-| [Media.Buddy_0.2.0_x64-setup.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64-setup.exe) | Installer. Recommended for most people. |
-| [Media.Buddy_0.2.0_x64_en-US.msi](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64_en-US.msi) | MSI package, for environments that prefer MSI. |
-| [mediabuddy.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/mediabuddy.exe) | Portable. No install; keeps its data beside the exe. |
+| [Media.Buddy_0.2.1_x64-setup.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.1/Media.Buddy_0.2.1_x64-setup.exe) | Installer. Recommended for most people. |
+| [Media.Buddy_0.2.1_x64_en-US.msi](https://github.com/aivrar/mediabuddy/releases/download/v0.2.1/Media.Buddy_0.2.1_x64_en-US.msi) | MSI package, for environments that prefer MSI. |
+| [mediabuddy.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.1/mediabuddy.exe) | Portable. No install; keeps its data beside the exe. |
 
-## Upgrading From 0.1.0
+## Upgrading
 
 Install or copy the new version over the old one. Your `data/` folder is kept.
 
-The library database is upgraded in place the first time 0.2.0 opens it. Going
-back to 0.1.0 afterwards is not supported: 0.1.0 does not keep caption origins
-or topic positions up to date. Close Media Buddy and copy the `data/` folder
-first if you may want to go back.
+The library database is upgraded in place the first time a newer version opens
+it. Going back to an older version afterwards is not supported: older versions
+do not keep caption origins or topic positions up to date. Close Media Buddy
+and copy the `data/` folder first if you may want to go back.
 
-Captions saved by 0.1.0 show as "not recorded" under **Caption by**, because
-0.1.0 did not track who wrote them. AI runs treat them as before.
+Version 0.1.0 did not track who wrote captions. On upgrade, the origin of each
+old caption is worked out where it can be proven (still the provider's text, or
+changed on an item that was never AI analyzed), and no caption text is changed.
+The rest show as "not recorded" under **Caption by** and are kept by AI runs
+unless **Keep unknown** is switched off. This applies whether you upgrade from
+0.1.0 or from 0.2.0.
 
 ## Portable Behavior
 
@@ -79,8 +83,8 @@ The build writes:
 
 ```text
 src-tauri/target/release/mediabuddy.exe
-src-tauri/target/release/bundle/nsis/Media Buddy_0.2.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/Media Buddy_0.2.0_x64_en-US.msi
+src-tauri/target/release/bundle/nsis/Media Buddy_0.2.1_x64-setup.exe
+src-tauri/target/release/bundle/msi/Media Buddy_0.2.1_x64_en-US.msi
 ```
 
 ## Data Directory Override

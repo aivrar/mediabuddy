@@ -44,6 +44,7 @@ const VISION_CAPTION_MODE_KEY = "mediabuddy.vision.captionMode.v1";
 const VISION_CAPTION_TASK_KEY = "mediabuddy.vision.captionTask.v1";
 const VISION_CAPTION_MIN_CHARS_KEY = "mediabuddy.vision.captionMinChars.v1";
 const VISION_PROTECT_MANUAL_KEY = "mediabuddy.vision.protectManual.v1";
+const VISION_PROTECT_UNKNOWN_KEY = "mediabuddy.vision.protectUnknown.v1";
 const VISION_DETECT_OBJECTS_KEY = "mediabuddy.vision.detectObjects.v1";
 const DEFAULT_VISION_CAPTION_MIN_CHARS = 80;
 
@@ -319,6 +320,8 @@ const ImagesTab: Component = () => {
     createSignal(loadVisionDetectObjects());
   const [visionProtectManual, setVisionProtectManualState] =
     createSignal(loadVisionProtectManual());
+  const [visionProtectUnknown, setVisionProtectUnknownState] =
+    createSignal(loadVisionProtectUnknown());
   const [inspectorId, setInspectorId] = createSignal<string | null>(null);
 
   const setVisionCaptionMode = (mode: VisionCaptionMode) => {
@@ -341,6 +344,10 @@ const ImagesTab: Component = () => {
   const setVisionProtectManual = (value: boolean) => {
     setVisionProtectManualState(value);
     saveVisionProtectManual(value);
+  };
+  const setVisionProtectUnknown = (value: boolean) => {
+    setVisionProtectUnknownState(value);
+    saveVisionProtectUnknown(value);
   };
 
   const refreshLibrary = async () => {
@@ -551,6 +558,7 @@ const ImagesTab: Component = () => {
         captionTask: visionCaptionTask(),
         captionMinChars: visionCaptionMinChars(),
         protectManual: visionProtectManual(),
+        protectUnknown: visionProtectUnknown(),
         loadIfNeeded: true,
       });
       // Only successful items carry the row as it was written. Anything else
@@ -570,8 +578,20 @@ const ImagesTab: Component = () => {
       );
       const writtenCaptions = summary.results.filter((r) => r.caption_written).length;
       const skipped = summary.skipped + locallySkipped;
+      // Captions the chosen mode would have replaced, but protection kept.
+      const keptManual = summary.results.filter(
+        (r) => r.caption_kept_reason === "manual"
+      ).length;
+      const keptUnknown = summary.results.filter(
+        (r) => r.caption_kept_reason === "unknown_origin"
+      ).length;
+      const keptParts: string[] = [];
+      if (keptManual > 0) keptParts.push(`${keptManual} typed by hand`);
+      if (keptUnknown > 0) keptParts.push(`${keptUnknown} of unrecorded origin`);
+      const keptText =
+        keptParts.length > 0 ? ` Captions kept: ${keptParts.join(", ")}.` : "";
       setLibInfo(
-        `Florence-2 done: ${summary.analyzed} analyzed, ${skipped} skipped, ${summary.failed} failed, ${writtenCaptions} caption${writtenCaptions === 1 ? "" : "s"} written, ${addedTags} tag${addedTags === 1 ? "" : "s"} added.`
+        `Florence-2 done: ${summary.analyzed} analyzed, ${skipped} skipped, ${summary.failed} failed, ${writtenCaptions} caption${writtenCaptions === 1 ? "" : "s"} written, ${addedTags} tag${addedTags === 1 ? "" : "s"} added.${keptText}`
       );
       if (summary.failed > 0) {
         const first = summary.results.find((r) => !r.ok && !r.skipped && r.error);
@@ -1642,11 +1662,13 @@ const ImagesTab: Component = () => {
                 visionCaptionMinChars={visionCaptionMinChars()}
                 visionDetectObjects={visionDetectObjects()}
                 visionProtectManual={visionProtectManual()}
+                visionProtectUnknown={visionProtectUnknown()}
                 onVisionCaptionModeChange={setVisionCaptionMode}
                 onVisionCaptionTaskChange={setVisionCaptionTask}
                 onVisionCaptionMinCharsChange={setVisionCaptionMinChars}
                 onVisionDetectObjectsChange={setVisionDetectObjects}
                 onVisionProtectManualChange={setVisionProtectManual}
+                onVisionProtectUnknownChange={setVisionProtectUnknown}
                 onSelectAll={selectAllLibrary}
                 onClear={clearLibrarySel}
                 onDelete={deleteSelected}
@@ -1762,11 +1784,13 @@ const ImagesTab: Component = () => {
                 visionCaptionMinChars={visionCaptionMinChars()}
                 visionDetectObjects={visionDetectObjects()}
                 visionProtectManual={visionProtectManual()}
+                visionProtectUnknown={visionProtectUnknown()}
                 onVisionCaptionModeChange={setVisionCaptionMode}
                 onVisionCaptionTaskChange={setVisionCaptionTask}
                 onVisionCaptionMinCharsChange={setVisionCaptionMinChars}
                 onVisionDetectObjectsChange={setVisionDetectObjects}
                 onVisionProtectManualChange={setVisionProtectManual}
+                onVisionProtectUnknownChange={setVisionProtectUnknown}
                 onAnalyze={() => runVisionForIds([img().id])}
                 onSave={async (patch) => {
                   try {
@@ -1778,6 +1802,30 @@ const ImagesTab: Component = () => {
                   } catch (e) {
                     setLibError(String(e));
                     throw e; // let the Inspector know the save failed
+                  }
+                }}
+                onMarkManual={async () => {
+                  try {
+                    const saved = await api.updateImage(img().id, {
+                      captionSource: "manual",
+                    });
+                    if (!saved) {
+                      throw new Error("This item is no longer in the library.");
+                    }
+                    updateImageInPlace(saved.id, saved);
+                  } catch (e) {
+                    setLibError(String(e));
+                  }
+                }}
+                onRestorePrevious={async () => {
+                  try {
+                    const saved = await api.restorePreviousCaption(img().id);
+                    if (!saved) {
+                      throw new Error("This item is no longer in the library.");
+                    }
+                    updateImageInPlace(saved.id, saved);
+                  } catch (e) {
+                    setLibError(String(e));
                   }
                 }}
                 onDelete={async () => {
@@ -2136,11 +2184,13 @@ const VisionOptionsControls: Component<{
   captionMinChars: number;
   detectObjects: boolean;
   protectManual: boolean;
+  protectUnknown: boolean;
   onCaptionModeChange: (value: VisionCaptionMode) => void;
   onCaptionTaskChange: (value: VisionCaptionTask) => void;
   onCaptionMinCharsChange: (value: number) => void;
   onDetectObjectsChange: (value: boolean) => void;
   onProtectManualChange: (value: boolean) => void;
+  onProtectUnknownChange: (value: boolean) => void;
 }> = (props) => (
   <div class="vision-options">
     <label class="vision-option">
@@ -2205,15 +2255,26 @@ const VisionOptionsControls: Component<{
       />
       <span>Keep manual</span>
     </label>
+    <label
+      class="vision-toggle"
+      title="Never replace a caption whose origin was not recorded (saved before Media Buddy tracked who wrote captions). It may have been typed by hand. Turn off to let Replace short / Overwrite replace those too; the replaced text is kept and can be restored."
+    >
+      <input
+        type="checkbox"
+        checked={props.protectUnknown}
+        disabled={props.disabled || props.captionMode === "skip"}
+        onChange={(e) => props.onProtectUnknownChange(e.currentTarget.checked)}
+      />
+      <span>Keep unknown</span>
+    </label>
   </div>
 );
 
-/** Who wrote the caption shown in the Inspector. */
-function captionSourceLabel(image: Image): string {
-  if (!image.alt) return "no caption";
-  switch (image.caption_source) {
+/** Names a caption origin. `provider` is the item's source, e.g. "Pexels". */
+function captionOriginLabel(origin: string, provider: string): string {
+  switch (origin) {
     case "provider":
-      return `${image.source} (provider)`;
+      return `${provider} (provider)`;
     case "ai":
       return "AI (Florence-2)";
     case "manual":
@@ -2221,6 +2282,20 @@ function captionSourceLabel(image: Image): string {
     default:
       return "not recorded";
   }
+}
+
+/** Who wrote the caption shown in the Inspector. */
+function captionSourceLabel(image: Image): string {
+  if (!image.alt.trim()) return "no caption";
+  return captionOriginLabel(image.caption_source, image.source);
+}
+
+/** A caption exists, but nobody recorded who wrote it. */
+function captionOriginUnknown(image: Image): boolean {
+  return (
+    image.alt.trim().length > 0 &&
+    !["provider", "ai", "manual"].includes(image.caption_source)
+  );
 }
 
 const BulkBar: Component<{
@@ -2234,11 +2309,13 @@ const BulkBar: Component<{
   visionCaptionMinChars: number;
   visionDetectObjects: boolean;
   visionProtectManual: boolean;
+  visionProtectUnknown: boolean;
   onVisionCaptionModeChange: (value: VisionCaptionMode) => void;
   onVisionCaptionTaskChange: (value: VisionCaptionTask) => void;
   onVisionCaptionMinCharsChange: (value: number) => void;
   onVisionDetectObjectsChange: (value: boolean) => void;
   onVisionProtectManualChange: (value: boolean) => void;
+  onVisionProtectUnknownChange: (value: boolean) => void;
   onSelectAll: () => void;
   onClear: () => void;
   onDelete: () => void;
@@ -2268,11 +2345,13 @@ const BulkBar: Component<{
           captionMinChars={props.visionCaptionMinChars}
           detectObjects={props.visionDetectObjects}
           protectManual={props.visionProtectManual}
+          protectUnknown={props.visionProtectUnknown}
           onCaptionModeChange={props.onVisionCaptionModeChange}
           onCaptionTaskChange={props.onVisionCaptionTaskChange}
           onCaptionMinCharsChange={props.onVisionCaptionMinCharsChange}
           onDetectObjectsChange={props.onVisionDetectObjectsChange}
           onProtectManualChange={props.onVisionProtectManualChange}
+          onProtectUnknownChange={props.onVisionProtectUnknownChange}
         />
         <Show when={props.selectedCount > 0}>
           <input
@@ -2341,13 +2420,19 @@ const Inspector: Component<{
   visionCaptionMinChars: number;
   visionDetectObjects: boolean;
   visionProtectManual: boolean;
+  visionProtectUnknown: boolean;
   onVisionCaptionModeChange: (value: VisionCaptionMode) => void;
   onVisionCaptionTaskChange: (value: VisionCaptionTask) => void;
   onVisionCaptionMinCharsChange: (value: number) => void;
   onVisionDetectObjectsChange: (value: boolean) => void;
   onVisionProtectManualChange: (value: boolean) => void;
+  onVisionProtectUnknownChange: (value: boolean) => void;
   onAnalyze: () => void;
   onSave: (patch: { alt?: string; tags?: string[] }) => Promise<void>;
+  /** Record the current caption as typed by hand, without changing it. */
+  onMarkManual: () => Promise<void>;
+  /** Put back the caption an AI run replaced. */
+  onRestorePrevious: () => Promise<void>;
   onDelete: () => Promise<void>;
 }> = (props) => {
   const [alt, setAlt] = createSignal(props.image.alt);
@@ -2393,7 +2478,8 @@ const Inspector: Component<{
   const save = async () => {
     setSaving(true);
     try {
-      const tags = tagsRaw()
+      const typedTags = tagsRaw();
+      const tags = typedTags
         .split(",")
         .map((t) => t.trim())
         .filter((t) => t.length > 0);
@@ -2408,10 +2494,22 @@ const Inspector: Component<{
       if (patch.alt !== undefined || patch.tags !== undefined) {
         await props.onSave(patch);
       }
-      // Show the tags as they were stored (trimmed, empties removed).
-      setTagsRaw(tags.join(", "));
+      // Show the tags as they were stored (trimmed, empties removed), unless
+      // the box was typed in again while the save was in flight.
+      if (tagsRaw() === typedTags) setTagsRaw(tags.join(", "));
       setSavedTick(true);
       setTimeout(() => setSavedTick(false), 1500);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // "Mark as mine" and "Restore" act on the saved caption, so they are only
+  // offered when there are no unsaved edits to confuse them with.
+  const runCaptionAction = async (action: () => Promise<void>) => {
+    setSaving(true);
+    try {
+      await action();
     } finally {
       setSaving(false);
     }
@@ -2518,7 +2616,27 @@ const Inspector: Component<{
           </dd>
         </Show>
         <dt>Caption by</dt>
-        <dd>{captionSourceLabel(props.image)}</dd>
+        <dd>
+          <span data-testid="caption-origin">
+            {captionSourceLabel(props.image)}
+          </span>
+          <Show when={captionOriginUnknown(props.image)}>
+            <button
+              type="button"
+              class="inline-action"
+              data-testid="mark-manual"
+              disabled={saving() || dirty()}
+              title={
+                dirty()
+                  ? "Save or undo your edits first"
+                  : "Record this caption as typed by hand. AI runs then keep it while Keep manual is on."
+              }
+              onClick={() => void runCaptionAction(props.onMarkManual)}
+            >
+              Mark as mine
+            </button>
+          </Show>
+        </dd>
         <dt>AI analyzed</dt>
         <dd>{props.image.vision_processed ? "yes" : "no"}</dd>
       </dl>
@@ -2532,6 +2650,34 @@ const Inspector: Component<{
             onInput={(e) => setAlt(e.currentTarget.value)}
           />
         </label>
+        <Show when={props.image.caption_previous.trim()}>
+          <div class="inspector-previous" data-testid="previous-caption">
+            <div class="inspector-previous-head">
+              <span>
+                Replaced caption ·{" "}
+                {captionOriginLabel(
+                  props.image.caption_previous_source,
+                  props.image.source
+                )}
+              </span>
+              <button
+                type="button"
+                class="inline-action"
+                data-testid="restore-previous"
+                disabled={saving() || dirty()}
+                title={
+                  dirty()
+                    ? "Save or undo your edits first"
+                    : "Put this caption back. The current caption is kept here instead, so this can be undone."
+                }
+                onClick={() => void runCaptionAction(props.onRestorePrevious)}
+              >
+                Restore
+              </button>
+            </div>
+            <p>{props.image.caption_previous}</p>
+          </div>
+        </Show>
         <label class="inspector-field">
           <span>Tags (comma-separated)</span>
           <textarea
@@ -2547,11 +2693,13 @@ const Inspector: Component<{
           captionMinChars={props.visionCaptionMinChars}
           detectObjects={props.visionDetectObjects}
           protectManual={props.visionProtectManual}
+          protectUnknown={props.visionProtectUnknown}
           onCaptionModeChange={props.onVisionCaptionModeChange}
           onCaptionTaskChange={props.onVisionCaptionTaskChange}
           onCaptionMinCharsChange={props.onVisionCaptionMinCharsChange}
           onDetectObjectsChange={props.onVisionDetectObjectsChange}
           onProtectManualChange={props.onVisionProtectManualChange}
+          onProtectUnknownChange={props.onVisionProtectUnknownChange}
         />
         <div class="inspector-actions">
           <button
@@ -3698,5 +3846,20 @@ function loadVisionProtectManual(): boolean {
 function saveVisionProtectManual(value: boolean) {
   try {
     localStorage.setItem(VISION_PROTECT_MANUAL_KEY, String(value));
+  } catch {}
+}
+
+function loadVisionProtectUnknown(): boolean {
+  try {
+    // On unless the user has explicitly switched it off.
+    return localStorage.getItem(VISION_PROTECT_UNKNOWN_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function saveVisionProtectUnknown(value: boolean) {
+  try {
+    localStorage.setItem(VISION_PROTECT_UNKNOWN_KEY, String(value));
   } catch {}
 }

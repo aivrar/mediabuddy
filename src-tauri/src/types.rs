@@ -40,6 +40,13 @@ pub struct Image {
     /// there is no caption, or for rows saved before this was tracked.
     #[serde(default)]
     pub caption_source: String,
+    /// The caption an AI run last replaced, kept so it can be restored.
+    /// Empty when nothing has been replaced.
+    #[serde(default)]
+    pub caption_previous: String,
+    /// Origin of `caption_previous` (same values as `caption_source`).
+    #[serde(default)]
+    pub caption_previous_source: String,
     pub tags: Vec<String>,
 
     pub color: Option<String>,
@@ -108,10 +115,24 @@ pub struct NewImage {
     pub created_at_provider: Option<String>,
 
     pub source_data: Value,
+
+    /// Who wrote `alt`, when the caller knows better than the default
+    /// ("provider"). Anything other than a known origin is ignored.
+    #[serde(default)]
+    pub caption_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteResult {
     pub deleted: usize,
     pub failed: usize,
+}
+
+/// True for the origins a caption can be recorded with. The empty string
+/// ("not recorded") is deliberately not one of them.
+pub fn is_known_caption_source(value: &str) -> bool {
+    matches!(
+        value,
+        CAPTION_SOURCE_PROVIDER | CAPTION_SOURCE_AI | CAPTION_SOURCE_MANUAL
+    )
 }

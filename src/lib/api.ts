@@ -43,6 +43,10 @@ export type Image = {
   alt: string;
   /** Who wrote `alt`: "provider" | "ai" | "manual" | "" (none / not recorded). */
   caption_source: string;
+  /** The caption an AI run last replaced ("" when none). */
+  caption_previous: string;
+  /** Origin of `caption_previous`, same values as `caption_source`. */
+  caption_previous_source: string;
   tags: string[];
   color: string | null;
   blur_hash: string | null;
@@ -170,6 +174,10 @@ export type VisionAnalyzeItem = {
   error: string | null;
   caption: string | null;
   caption_written: boolean;
+  /** Why the generated caption was not stored: "mode" | "manual" |
+   *  "unknown_origin" | "tags_only" | "nothing_generated". Null when it was
+   *  stored, or the item failed or was skipped. */
+  caption_kept_reason: string | null;
   tags_added: string[];
   objects: DetectedObject[];
   image: Image | null;
@@ -336,8 +344,27 @@ export const api = {
   deleteImages: (ids: string[]) => invoke<DeleteResult>("delete_images", { ids }),
   isUrlSaved: (url: string) => invoke<boolean>("is_url_saved", { url }),
   /** Resolves to the saved row, or null if the item no longer exists. */
-  updateImage: (id: string, patch: { alt?: string; tags?: string[] }) =>
-    invoke<Image | null>("update_image", { id, alt: patch.alt, tags: patch.tags }),
+  updateImage: (
+    id: string,
+    patch: {
+      alt?: string;
+      tags?: string[];
+      /** States who wrote the caption. Sent on its own it labels the caption
+       *  the item already has. */
+      captionSource?: "manual" | "ai" | "provider";
+    }
+  ) =>
+    invoke<Image | null>("update_image", {
+      id,
+      alt: patch.alt,
+      tags: patch.tags,
+      captionSource: patch.captionSource,
+    }),
+  /** Puts back the caption an AI run replaced. Resolves to the saved row, or
+   *  null if the item no longer exists; rejects when there is nothing to
+   *  restore. */
+  restorePreviousCaption: (id: string) =>
+    invoke<Image | null>("restore_previous_caption", { id }),
   /** Adds tags to whatever is stored now. Resolves to the saved row, or null
    *  if the item no longer exists. */
   appendImageTags: (id: string, tags: string[]) =>
@@ -425,6 +452,8 @@ export const api = {
       captionMinChars?: number;
       /** Keep captions typed by hand, whatever the mode. Defaults to true. */
       protectManual?: boolean;
+      /** Keep captions whose origin was never recorded. Defaults to true. */
+      protectUnknown?: boolean;
       loadIfNeeded?: boolean;
       concurrency?: number;
     }
@@ -438,6 +467,7 @@ export const api = {
         caption_task: options?.captionTask,
         caption_min_chars: options?.captionMinChars,
         protect_manual: options?.protectManual ?? true,
+        protect_unknown: options?.protectUnknown ?? true,
         load_if_needed: options?.loadIfNeeded ?? true,
         concurrency: options?.concurrency,
       },

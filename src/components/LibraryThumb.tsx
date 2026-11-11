@@ -66,8 +66,18 @@ const LibraryThumb: Component<Props> = (props) => {
   return (
     <img
       ref={imgEl}
-      src={url() ?? ""}
-      alt={props.alt ?? ""}
+      // No `src` and no alt text until a thumbnail exists: an item without
+      // one (a video saved with no poster) shows a plain tile instead of the
+      // browser's broken-image mark.
+      src={url() ?? undefined}
+      alt={url() ? (props.alt ?? "") : ""}
+      onError={() => {
+        // Bytes that are not a displayable image: fall back to the plain tile.
+        if (url()) {
+          setUrl(null);
+          setError(true);
+        }
+      }}
       classList={{ "thumb-loaded": !!url(), "thumb-error": error() }}
       style={{
         width: "100%",
@@ -75,6 +85,10 @@ const LibraryThumb: Component<Props> = (props) => {
         "object-fit": "cover",
         background: "var(--bg-input)",
         opacity: url() ? 1 : 0.2,
+        // Without an image there is nothing to draw; hiding the element also
+        // hides the browser's broken-image mark. It keeps its box, so the
+        // lazy-load observer still sees it.
+        visibility: url() ? "visible" : "hidden",
         transition: "opacity 200ms",
       }}
     />

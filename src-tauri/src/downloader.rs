@@ -319,6 +319,7 @@ fn build_new_image(result: &SearchResult, parts: DownloadedMediaParts) -> NewIma
         ai_generated: result.ai_generated,
         created_at_provider: result.created_at_provider.clone(),
         source_data: result.source_data.clone(),
+        caption_source: result.caption_source.clone(),
     }
 }
 
