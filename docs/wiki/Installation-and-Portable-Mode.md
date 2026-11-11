@@ -1,24 +1,26 @@
 # Installation And Portable Mode
 
-## Recommended Release Files
+## Download
 
-Publish the installer for normal users:
+Version 0.2.0 is on the [v0.2.0 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.0):
 
-```text
-src-tauri/target/release/bundle/nsis/Media Buddy_0.1.0_x64-setup.exe
-```
+| File | Use it for |
+| --- | --- |
+| [Media.Buddy_0.2.0_x64-setup.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64-setup.exe) | Installer. Recommended for most people. |
+| [Media.Buddy_0.2.0_x64_en-US.msi](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64_en-US.msi) | MSI package, for environments that prefer MSI. |
+| [mediabuddy.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/mediabuddy.exe) | Portable. No install; keeps its data beside the exe. |
 
-Optional MSI installer:
+## Upgrading From 0.1.0
 
-```text
-src-tauri/target/release/bundle/msi/Media Buddy_0.1.0_x64_en-US.msi
-```
+Install or copy the new version over the old one. Your `data/` folder is kept.
 
-Portable executable:
+The library database is upgraded in place the first time 0.2.0 opens it. Going
+back to 0.1.0 afterwards is not supported: 0.1.0 does not keep caption origins
+or topic positions up to date. Close Media Buddy and copy the `data/` folder
+first if you may want to go back.
 
-```text
-src-tauri/target/release/mediabuddy.exe
-```
+Captions saved by 0.1.0 show as "not recorded" under **Caption by**, because
+0.1.0 did not track who wrote them. AI runs treat them as before.
 
 ## Portable Behavior
 
@@ -41,6 +43,16 @@ data/
 Sharing only the exe gives the other user a clean first-run app with no keys,
 no downloads, no models, and no library.
 
+If the folder containing the exe is not writable (for example a per-machine
+install under `C:\Program Files`), Media Buddy stores its data in the per-user
+folder instead:
+
+```text
+%LOCALAPPDATA%\MediaBuddy\data
+```
+
+The folder in use is written to the log at startup.
+
 ## Windows Requirements
 
 - Windows 10 or 11.
@@ -61,6 +73,14 @@ Create release builds:
 
 ```powershell
 npm run tauri build -- --bundles nsis,msi
+```
+
+The build writes:
+
+```text
+src-tauri/target/release/mediabuddy.exe
+src-tauri/target/release/bundle/nsis/Media Buddy_0.2.0_x64-setup.exe
+src-tauri/target/release/bundle/msi/Media Buddy_0.2.0_x64_en-US.msi
 ```
 
 ## Data Directory Override

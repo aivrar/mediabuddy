@@ -43,6 +43,32 @@ Use a topic's **More** behavior to continue from its saved provider cursor
 instead of starting over. This helps avoid downloading the same items repeatedly
 when gathering large sets.
 
+You can change the results-per-source value between rounds. The topic tracks how
+many items it has consumed from each provider, so a different page size never
+skips results.
+
+## Results Wait For You
+
+Results a topic has fetched stay with the topic until you download or dismiss
+them. If you close the app, switch tabs, or run another search, they come back
+the next time you open or search that topic, marked as waiting from earlier
+rounds.
+
+**Dismiss all** removes the results on screen (and anything else still waiting
+for that topic) without downloading them. Dismissed results are not offered
+again unless you reset the topic.
+
+## Provider Errors
+
+A provider call that fails (rate limit reached, key rejected, provider outage)
+is reported as an error with the reason. It does not mark the source as
+exhausted: the same page is tried again on the next round, and nothing is
+skipped. A source is only marked exhausted when the provider really returns no
+more results.
+
+Unsplash's extra per-photo detail calls are optional enrichment. If one fails,
+the photo is still shown using its search summary.
+
 ## Search Preview
 
 Search results are not automatically saved. They are provider results until you

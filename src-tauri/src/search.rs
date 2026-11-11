@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use crate::config::Settings;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::quota::{QuotaTracker, Source as QuotaSource};
 
 /// Search-time representation of a media item. Carries every field we'll
@@ -162,24 +162,96 @@ pub struct UnsplashSearchOptions {
     pub fetch_details: bool,
 }
 
+/// Split a request for `count` items into `(page, per_page)` calls.
+///
+/// Every page uses the SAME `per_page`: providers compute the offset as
+/// `(page - 1) * per_page`, so shrinking the last page would re-fetch earlier
+/// items instead of the tail. The final page may therefore return more than
+/// is needed; `search_all` trims the surplus.
 fn paginate(count: u32, max_per_page: u32) -> Vec<(u32, u32)> {
     if count == 0 {
         return Vec::new();
     }
+    // 3 is the smallest page size Pixabay accepts.
     let per_page = count.min(max_per_page).max(3);
-    let mut pages = Vec::new();
-    let mut left = count;
-    let mut page = 1u32;
-    while left > 0 {
-        let take = left.min(per_page);
-        pages.push((page, take));
-        left = left.saturating_sub(take);
-        page += 1;
-        if page > 50 {
-            break; // safety
+    let pages = count.div_ceil(per_page).min(50); // safety cap
+    (1..=pages).map(|page| (page, per_page)).collect()
+}
+
+/// Turn a non-2xx provider response into an error, so callers can tell
+/// "the provider failed" apart from "the provider has nothing more".
+/// The one exception is Pixabay, which answers a page past the end of the
+/// result set with HTTP 400 — that really is the end, not a failure.
+async fn provider_failure(provider: &str, resp: reqwest::Response) -> Result<Vec<SearchResult>> {
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if provider == "Pixabay"
+        && status == 400
+        && body.to_ascii_lowercase().contains("out of valid range")
+    {
+        return Ok(Vec::new());
+    }
+    let hint = match status {
+        401 => " (API key rejected)",
+        403 => " (API key rejected or rate limit reached)",
+        429 => " (rate limit reached)",
+        500..=599 => " (provider is having problems)",
+        _ => "",
+    };
+    Err(AppError::other(format!(
+        "{provider} returned HTTP {status}{hint}"
+    )))
+}
+
+/// Whether `min_width` / `min_height` are checked here after the provider
+/// answers (true) or sent to the provider as query parameters (false).
+/// `source` and `kind` are the lowercase names used by topic cursors.
+fn dimensions_checked_locally(source: &str, kind: &str) -> bool {
+    matches!((source, kind), ("pexels", "photo") | ("unsplash", "photo"))
+}
+
+/// Apply the filters the provider has no parameter for: "exclude AI
+/// generated" everywhere, and minimum width/height where the provider cannot
+/// do it itself. Items whose size is unknown are kept.
+pub fn apply_local_filters(
+    results: &mut Vec<SearchResult>,
+    filters: &SearchFilters,
+    source: &str,
+    kind: &str,
+) {
+    if filters.exclude_ai.unwrap_or(false) {
+        results.retain(|r| !r.ai_generated.unwrap_or(false));
+    }
+    if dimensions_checked_locally(source, kind) {
+        if let Some(min_w) = filters.min_width {
+            results.retain(|r| r.width.map(|w| w as u32 >= min_w).unwrap_or(true));
+        }
+        if let Some(min_h) = filters.min_height {
+            results.retain(|r| r.height.map(|h| h as u32 >= min_h).unwrap_or(true));
         }
     }
-    pages
+}
+
+/// A copy of `filters` with the locally applied ones switched off. A caller
+/// that needs to know how many items the provider itself returned searches
+/// with this copy, counts, and then calls [`apply_local_filters`] with the
+/// real filters. Without that, a page that had results but lost them all to
+/// a local filter looks the same as the end of the result set.
+pub fn provider_side_filters(filters: &SearchFilters, source: &str, kind: &str) -> SearchFilters {
+    let mut out = filters.clone();
+    out.exclude_ai = None;
+    if dimensions_checked_locally(source, kind) {
+        out.min_width = None;
+        out.min_height = None;
+    }
+    out
+}
+
+/// Transport error for a provider call, with the request URL removed: the
+/// Pixabay URL carries the API key as a query parameter and these errors are
+/// written to the log.
+fn request_error(err: reqwest::Error) -> AppError {
+    AppError::Http(err.without_url())
 }
 
 // ============================================================================
@@ -260,12 +332,13 @@ pub async fn search_pixabay(
         .query(&q)
         .timeout(std::time::Duration::from_secs(15))
         .send()
-        .await?;
+        .await
+        .map_err(request_error)?;
     if let Some(t) = tracker {
         t.record(QuotaSource::Pixabay, &resp);
     }
     if !resp.status().is_success() {
-        return Ok(Vec::new());
+        return provider_failure("Pixabay", resp).await;
     }
     let body: Value = resp.json().await?;
     let hits = body
@@ -277,9 +350,7 @@ pub async fn search_pixabay(
         .into_iter()
         .map(|hit| pixabay_photo_from_hit(hit, query))
         .collect();
-    if filters.exclude_ai.unwrap_or(false) {
-        results.retain(|r| !r.ai_generated.unwrap_or(false));
-    }
+    apply_local_filters(&mut results, filters, "pixabay", "photo");
     Ok(results)
 }
 
@@ -402,12 +473,13 @@ pub async fn search_pixabay_videos(
         .query(&q)
         .timeout(std::time::Duration::from_secs(15))
         .send()
-        .await?;
+        .await
+        .map_err(request_error)?;
     if let Some(t) = tracker {
         t.record(QuotaSource::Pixabay, &resp);
     }
     if !resp.status().is_success() {
-        return Ok(Vec::new());
+        return provider_failure("Pixabay", resp).await;
     }
     let body: Value = resp.json().await?;
     let hits = body
@@ -419,9 +491,7 @@ pub async fn search_pixabay_videos(
         .into_iter()
         .map(|hit| pixabay_video_from_hit(hit, query))
         .collect();
-    if filters.exclude_ai.unwrap_or(false) {
-        results.retain(|r| !r.ai_generated.unwrap_or(false));
-    }
+    apply_local_filters(&mut results, filters, "pixabay", "video");
     Ok(results)
 }
 
@@ -543,12 +613,13 @@ pub async fn search_pexels(
         .query(&q)
         .timeout(std::time::Duration::from_secs(15))
         .send()
-        .await?;
+        .await
+        .map_err(request_error)?;
     if let Some(t) = tracker {
         t.record(QuotaSource::Pexels, &resp);
     }
     if !resp.status().is_success() {
-        return Ok(Vec::new());
+        return provider_failure("Pexels", resp).await;
     }
     let body: Value = resp.json().await?;
     let photos = body
@@ -560,12 +631,7 @@ pub async fn search_pexels(
         .into_iter()
         .map(|p| pexels_photo_from(p, query))
         .collect();
-    if let Some(min_w) = filters.min_width {
-        results.retain(|r| r.width.map(|w| w as u32 >= min_w).unwrap_or(true));
-    }
-    if let Some(min_h) = filters.min_height {
-        results.retain(|r| r.height.map(|h| h as u32 >= min_h).unwrap_or(true));
-    }
+    apply_local_filters(&mut results, filters, "pexels", "photo");
     Ok(results)
 }
 
@@ -660,12 +726,13 @@ pub async fn search_pexels_videos(
         .query(&q)
         .timeout(std::time::Duration::from_secs(15))
         .send()
-        .await?;
+        .await
+        .map_err(request_error)?;
     if let Some(t) = tracker {
         t.record(QuotaSource::Pexels, &resp);
     }
     if !resp.status().is_success() {
-        return Ok(Vec::new());
+        return provider_failure("Pexels", resp).await;
     }
     let body: Value = resp.json().await?;
     let videos = body
@@ -809,12 +876,13 @@ pub async fn search_unsplash(
         .query(&q)
         .timeout(std::time::Duration::from_secs(15))
         .send()
-        .await?;
+        .await
+        .map_err(request_error)?;
     if let Some(t) = tracker {
         t.record(QuotaSource::Unsplash, &resp);
     }
     if !resp.status().is_success() {
-        return Ok(Vec::new());
+        return provider_failure("Unsplash", resp).await;
     }
     let body: Value = resp.json().await?;
     let summaries = body
@@ -832,15 +900,14 @@ pub async fn search_unsplash(
             .into_iter()
             .map(|p| unsplash_photo_from(p, query))
             .collect();
-        if let Some(min_w) = filters.min_width {
-            results.retain(|r| r.width.map(|w| w as u32 >= min_w).unwrap_or(true));
-        }
-        if let Some(min_h) = filters.min_height {
-            results.retain(|r| r.height.map(|h| h as u32 >= min_h).unwrap_or(true));
-        }
+        apply_local_filters(&mut results, filters, "unsplash", "photo");
         return Ok(results);
     }
 
+    // The detail call only enriches metadata. If it fails for any reason
+    // (most often the hourly quota running out part-way through a page), keep
+    // the photo using its search summary — dropping it would lose it for
+    // good, because the topic cursor still moves past this page.
     let detail_futs = summaries.into_iter().map(|p| {
         let client = client.clone();
         let auth = auth.clone();
@@ -856,32 +923,30 @@ pub async fn search_unsplash(
                 return None;
             }
             let url = format!("https://api.unsplash.com/photos/{id}");
-            let resp = client
-                .get(&url)
-                .header("Authorization", &auth)
-                .timeout(std::time::Duration::from_secs(15))
-                .send()
-                .await
-                .ok()?;
-            if let Some(t) = tracker_opt.as_ref() {
-                t.record(QuotaSource::Unsplash, &resp);
+            let detail: Option<Value> = async {
+                let resp = client
+                    .get(&url)
+                    .header("Authorization", &auth)
+                    .timeout(std::time::Duration::from_secs(15))
+                    .send()
+                    .await
+                    .ok()?;
+                if let Some(t) = tracker_opt.as_ref() {
+                    t.record(QuotaSource::Unsplash, &resp);
+                }
+                if !resp.status().is_success() {
+                    return None;
+                }
+                resp.json::<Value>().await.ok()
             }
-            if !resp.status().is_success() {
-                return None;
-            }
-            let full: Value = resp.json().await.ok()?;
-            Some(unsplash_photo_from(full, &query))
+            .await;
+            Some(unsplash_photo_from(detail.unwrap_or(p), &query))
         }
     });
 
     let detail_results = join_all(detail_futs).await;
     let mut results: Vec<SearchResult> = detail_results.into_iter().flatten().collect();
-    if let Some(min_w) = filters.min_width {
-        results.retain(|r| r.width.map(|w| w as u32 >= min_w).unwrap_or(true));
-    }
-    if let Some(min_h) = filters.min_height {
-        results.retain(|r| r.height.map(|h| h as u32 >= min_h).unwrap_or(true));
-    }
+    apply_local_filters(&mut results, filters, "unsplash", "photo");
     Ok(results)
 }
 
@@ -1014,7 +1079,10 @@ pub async fn search_all(
 
     let count_override = filters.count_per_source;
 
-    let mut tasks: Vec<tokio::task::JoinHandle<Result<Vec<SearchResult>>>> = Vec::new();
+    // Each (source, media kind) is one group with its own item limit, so the
+    // surplus from a full-size final page can be trimmed per group.
+    let mut group_limits: Vec<usize> = Vec::new();
+    let mut tasks: Vec<(usize, tokio::task::JoinHandle<Result<Vec<SearchResult>>>)> = Vec::new();
 
     // Heuristic for skipping the per-result Unsplash detail fetch: when the
     // user is harvesting a large number of items, the extra round-trip per
@@ -1029,28 +1097,46 @@ pub async fn search_all(
                 .unwrap_or(pages_arg.saturating_mul(PIXABAY_PHOTO_MAX_PER_PAGE))
                 .max(1);
             if want_photos {
+                let group = group_limits.len();
+                group_limits.push(count as usize);
                 for (page, per_page) in paginate(count, PIXABAY_PHOTO_MAX_PER_PAGE) {
                     let client = client.clone();
                     let key = snapshot.pixabay_key.clone();
                     let q = query.clone();
                     let f = filters.clone();
                     let tr = tracker.clone();
-                    tasks.push(tokio::spawn(async move {
-                        search_pixabay(&client, &key, &q, &f, page, per_page, tr.as_ref()).await
-                    }));
+                    tasks.push((
+                        group,
+                        tokio::spawn(async move {
+                            search_pixabay(&client, &key, &q, &f, page, per_page, tr.as_ref()).await
+                        }),
+                    ));
                 }
             }
             if want_videos {
+                let group = group_limits.len();
+                group_limits.push(count as usize);
                 for (page, per_page) in paginate(count, PIXABAY_VIDEO_MAX_PER_PAGE) {
                     let client = client.clone();
                     let key = snapshot.pixabay_key.clone();
                     let q = query.clone();
                     let f = filters.clone();
                     let tr = tracker.clone();
-                    tasks.push(tokio::spawn(async move {
-                        search_pixabay_videos(&client, &key, &q, &f, page, per_page, tr.as_ref())
+                    tasks.push((
+                        group,
+                        tokio::spawn(async move {
+                            search_pixabay_videos(
+                                &client,
+                                &key,
+                                &q,
+                                &f,
+                                page,
+                                per_page,
+                                tr.as_ref(),
+                            )
                             .await
-                    }));
+                        }),
+                    ));
                 }
             }
         }
@@ -1061,28 +1147,38 @@ pub async fn search_all(
                 .unwrap_or(pages_arg.saturating_mul(PEXELS_MAX_PER_PAGE))
                 .max(1);
             if want_photos {
+                let group = group_limits.len();
+                group_limits.push(count as usize);
                 for (page, per_page) in paginate(count, PEXELS_MAX_PER_PAGE) {
                     let client = client.clone();
                     let key = snapshot.pexels_key.clone();
                     let q = query.clone();
                     let f = filters.clone();
                     let tr = tracker.clone();
-                    tasks.push(tokio::spawn(async move {
-                        search_pexels(&client, &key, &q, &f, page, per_page, tr.as_ref()).await
-                    }));
+                    tasks.push((
+                        group,
+                        tokio::spawn(async move {
+                            search_pexels(&client, &key, &q, &f, page, per_page, tr.as_ref()).await
+                        }),
+                    ));
                 }
             }
             if want_videos {
+                let group = group_limits.len();
+                group_limits.push(count as usize);
                 for (page, per_page) in paginate(count, PEXELS_MAX_PER_PAGE) {
                     let client = client.clone();
                     let key = snapshot.pexels_key.clone();
                     let q = query.clone();
                     let f = filters.clone();
                     let tr = tracker.clone();
-                    tasks.push(tokio::spawn(async move {
-                        search_pexels_videos(&client, &key, &q, &f, page, per_page, tr.as_ref())
-                            .await
-                    }));
+                    tasks.push((
+                        group,
+                        tokio::spawn(async move {
+                            search_pexels_videos(&client, &key, &q, &f, page, per_page, tr.as_ref())
+                                .await
+                        }),
+                    ));
                 }
             }
         }
@@ -1094,37 +1190,53 @@ pub async fn search_all(
                 .max(1);
             let fetch_details = count <= unsplash_detail_threshold;
             if want_photos {
+                let group = group_limits.len();
+                group_limits.push(count as usize);
                 for (page, per_page) in paginate(count, UNSPLASH_MAX_PER_PAGE) {
                     let client = client.clone();
                     let key = snapshot.unsplash_key.clone();
                     let q = query.clone();
                     let f = filters.clone();
                     let tr = tracker.clone();
-                    tasks.push(tokio::spawn(async move {
-                        search_unsplash(
-                            &client,
-                            &key,
-                            &q,
-                            &f,
-                            tr.as_ref(),
-                            UnsplashSearchOptions {
-                                page,
-                                per_page,
-                                fetch_details,
-                            },
-                        )
-                        .await
-                    }));
+                    tasks.push((
+                        group,
+                        tokio::spawn(async move {
+                            search_unsplash(
+                                &client,
+                                &key,
+                                &q,
+                                &f,
+                                tr.as_ref(),
+                                UnsplashSearchOptions {
+                                    page,
+                                    per_page,
+                                    fetch_details,
+                                },
+                            )
+                            .await
+                        }),
+                    ));
                 }
             }
             // No Unsplash video API
         }
     }
 
+    // Pages are awaited in the order they were requested, so trimming keeps
+    // the first `limit` items of each group.
+    let mut taken: Vec<usize> = vec![0; group_limits.len()];
     let mut combined = Vec::new();
-    for handle in tasks {
-        if let Ok(Ok(mut results)) = handle.await {
-            combined.append(&mut results);
+    for (group, handle) in tasks {
+        match handle.await {
+            Ok(Ok(results)) => {
+                let room = group_limits[group].saturating_sub(taken[group]);
+                let before = combined.len();
+                combined.extend(results.into_iter().take(room));
+                taken[group] += combined.len() - before;
+            }
+            // One provider failing must not hide the others' results.
+            Ok(Err(err)) => tracing::warn!("search page failed: {err}"),
+            Err(err) => tracing::warn!("search task failed: {err}"),
         }
     }
     Ok(combined)
@@ -1148,4 +1260,83 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_local_filters, paginate, provider_side_filters, SearchFilters, SearchResult,
+    };
+
+    #[test]
+    fn local_filters_can_be_applied_after_counting_the_page() {
+        let filters = SearchFilters {
+            exclude_ai: Some(true),
+            min_width: Some(1000),
+            min_height: Some(500),
+            ..Default::default()
+        };
+        let sized = |w: i64, h: i64| {
+            let mut r = SearchResult::empty("Pexels", "photo", "q");
+            r.width = Some(w);
+            r.height = Some(h);
+            r
+        };
+
+        // Pexels photos: the size limits are local, so the provider is asked
+        // without them and they are applied afterwards.
+        let asked = provider_side_filters(&filters, "pexels", "photo");
+        assert_eq!(
+            (asked.exclude_ai, asked.min_width, asked.min_height),
+            (None, None, None)
+        );
+        let mut page = vec![sized(800, 600), sized(1200, 400), sized(1200, 800)];
+        apply_local_filters(&mut page, &asked, "pexels", "photo");
+        assert_eq!(
+            page.len(),
+            3,
+            "the provider-side copy filters nothing locally"
+        );
+        apply_local_filters(&mut page, &filters, "pexels", "photo");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].width, Some(1200));
+
+        // A page can lose everything to the filter and still have had hits.
+        let mut page = vec![sized(10, 10), sized(20, 20)];
+        apply_local_filters(&mut page, &filters, "unsplash", "photo");
+        assert!(page.is_empty());
+
+        // Pixabay applies the size limits itself: they stay in the request
+        // and are not re-checked here. Only the AI filter is local.
+        let asked = provider_side_filters(&filters, "pixabay", "photo");
+        assert_eq!(
+            (asked.exclude_ai, asked.min_width, asked.min_height),
+            (None, Some(1000), Some(500))
+        );
+        let mut ai = SearchResult::empty("Pixabay", "photo", "q");
+        ai.ai_generated = Some(true);
+        ai.width = Some(10);
+        let mut small = SearchResult::empty("Pixabay", "photo", "q");
+        small.width = Some(10);
+        let mut page = vec![ai, small];
+        apply_local_filters(&mut page, &filters, "pixabay", "photo");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].ai_generated, None);
+    }
+
+    #[test]
+    fn every_page_uses_the_same_page_size() {
+        // 250 from a provider capped at 200 per page: two full-size pages
+        // (the caller trims the surplus), never a shrunken second page.
+        assert_eq!(paginate(250, 200), vec![(1, 200), (2, 200)]);
+        assert_eq!(paginate(200, 200), vec![(1, 200)]);
+        assert_eq!(paginate(90, 30), vec![(1, 30), (2, 30), (3, 30)]);
+        assert_eq!(paginate(0, 200), Vec::new());
+    }
+
+    #[test]
+    fn page_size_never_drops_below_the_provider_minimum() {
+        assert_eq!(paginate(1, 200), vec![(1, 3)]);
+        assert_eq!(paginate(4, 200), vec![(1, 4)]);
+    }
 }

@@ -117,20 +117,36 @@ pub fn caption_task_from_name(task: Option<&str>) -> &'static str {
     }
 }
 
-pub fn should_write_caption(
-    mode: CaptionWriteMode,
-    existing: &str,
-    generated: &str,
-    min_chars: usize,
-) -> bool {
-    if generated.trim().is_empty() {
-        return false;
-    }
-    match mode {
-        CaptionWriteMode::MissingOnly => existing.trim().is_empty(),
-        CaptionWriteMode::ReplaceShort => existing.trim().chars().count() < min_chars,
-        CaptionWriteMode::Overwrite => true,
-        CaptionWriteMode::Skip => false,
+/// Decides whether a generated caption may replace what is stored.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptionPolicy {
+    pub mode: CaptionWriteMode,
+    /// Threshold for `ReplaceShort`, in characters.
+    pub min_chars: usize,
+    /// When true, a caption a person wrote is never replaced, in any mode.
+    pub protect_manual: bool,
+}
+
+impl CaptionPolicy {
+    /// `existing` / `existing_source` must describe the row as it is at
+    /// write time (see `ImageManager::apply_vision_result`).
+    pub fn should_write(&self, existing: &str, existing_source: &str, generated: &str) -> bool {
+        if generated.trim().is_empty() {
+            return false;
+        }
+        let existing = existing.trim();
+        if self.protect_manual
+            && !existing.is_empty()
+            && existing_source == crate::types::CAPTION_SOURCE_MANUAL
+        {
+            return false;
+        }
+        match self.mode {
+            CaptionWriteMode::MissingOnly => existing.is_empty(),
+            CaptionWriteMode::ReplaceShort => existing.chars().count() < self.min_chars,
+            CaptionWriteMode::Overwrite => true,
+            CaptionWriteMode::Skip => false,
+        }
     }
 }
 
@@ -307,6 +323,22 @@ pub struct VisionRegistry {
     inner: Mutex<RegistryState>,
     load_lock: Mutex<()>,
     next_idx: AtomicUsize,
+    /// Analysis jobs currently running (a job is one batch, not one image).
+    active_jobs: AtomicUsize,
+}
+
+/// Held for the duration of an analysis job. While any guard is alive the
+/// model stays loaded: `try_unload` refuses, so one job (or a user clicking
+/// Unload) cannot pull the engines out from under another job's remaining
+/// images.
+pub struct VisionJobGuard {
+    registry: Arc<VisionRegistry>,
+}
+
+impl Drop for VisionJobGuard {
+    fn drop(&mut self) {
+        self.registry.active_jobs.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct RegistryState {
@@ -333,7 +365,32 @@ impl VisionRegistry {
             }),
             load_lock: Mutex::new(()),
             next_idx: AtomicUsize::new(0),
+            active_jobs: AtomicUsize::new(0),
         }
+    }
+
+    /// Mark the start of an analysis job. Keep the guard until the job's
+    /// last image is done.
+    pub fn begin_job(self: &Arc<Self>) -> VisionJobGuard {
+        self.active_jobs.fetch_add(1, Ordering::SeqCst);
+        VisionJobGuard {
+            registry: self.clone(),
+        }
+    }
+
+    pub fn active_jobs(&self) -> usize {
+        self.active_jobs.load(Ordering::SeqCst)
+    }
+
+    /// Unload the model unless an analysis job is running. Returns whether
+    /// it was unloaded.
+    pub fn try_unload(&self) -> bool {
+        let _load_guard = recover_lock(&self.load_lock);
+        if self.active_jobs() > 0 {
+            return false;
+        }
+        self.clear_locked();
+        true
     }
 
     pub fn status(&self) -> VisionStatus {
@@ -354,8 +411,8 @@ impl VisionRegistry {
         }
     }
 
-    pub fn unload_all(&self) {
-        let _load_guard = recover_lock(&self.load_lock);
+    /// Drop every engine. Caller must hold `load_lock`.
+    fn clear_locked(&self) {
         let mut st = recover_lock(&self.inner);
         st.instances.clear();
         st.precision = None;
@@ -905,7 +962,70 @@ fn ensure_ort_initialized(cache_dir: &Path, flavor: RuntimeFlavor) -> Result<Run
 
 #[cfg(test)]
 mod tests {
-    use super::{should_plan_cpu_workers, VisionExecutionMode};
+    use super::{
+        should_plan_cpu_workers, CaptionPolicy, CaptionWriteMode, VisionExecutionMode,
+        VisionRegistry,
+    };
+    use std::sync::Arc;
+
+    fn policy(mode: CaptionWriteMode, protect_manual: bool) -> CaptionPolicy {
+        CaptionPolicy {
+            mode,
+            min_chars: 80,
+            protect_manual,
+        }
+    }
+
+    #[test]
+    fn caption_modes_follow_the_documented_policy() {
+        let short = "A short provider line";
+        let long = "x".repeat(120);
+        let missing = policy(CaptionWriteMode::MissingOnly, true);
+        assert!(missing.should_write("", "", "generated"));
+        assert!(!missing.should_write(short, "provider", "generated"));
+
+        let replace_short = policy(CaptionWriteMode::ReplaceShort, true);
+        assert!(replace_short.should_write(short, "provider", "generated"));
+        assert!(!replace_short.should_write(&long, "provider", "generated"));
+
+        let overwrite = policy(CaptionWriteMode::Overwrite, true);
+        assert!(overwrite.should_write(&long, "ai", "generated"));
+        assert!(overwrite.should_write(&long, "", "generated"));
+
+        let skip = policy(CaptionWriteMode::Skip, false);
+        assert!(!skip.should_write("", "", "generated"));
+        // Never write an empty generation over anything.
+        assert!(!overwrite.should_write(short, "provider", "   "));
+    }
+
+    #[test]
+    fn manual_captions_are_protected_unless_opted_out() {
+        let short = "Typed by hand";
+        for mode in [CaptionWriteMode::ReplaceShort, CaptionWriteMode::Overwrite] {
+            assert!(!policy(mode, true).should_write(short, "manual", "generated"));
+            assert!(policy(mode, false).should_write(short, "manual", "generated"));
+        }
+        // An empty caption has nothing to protect, whatever its recorded origin.
+        assert!(policy(CaptionWriteMode::MissingOnly, true).should_write(
+            "",
+            "manual",
+            "generated"
+        ));
+    }
+
+    #[test]
+    fn unload_is_refused_while_a_job_is_running() {
+        let registry = Arc::new(VisionRegistry::new());
+        let job = registry.begin_job();
+        let second = registry.begin_job();
+        assert_eq!(registry.active_jobs(), 2);
+        assert!(!registry.try_unload());
+        drop(job);
+        assert!(!registry.try_unload());
+        drop(second);
+        assert_eq!(registry.active_jobs(), 0);
+        assert!(registry.try_unload());
+    }
 
     #[test]
     fn cpu_mode_always_plans_cpu_workers() {

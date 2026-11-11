@@ -20,6 +20,10 @@ token when one is configured:
 Authorization: Bearer <token>
 ```
 
+`PUT /api/v1/settings` rejects an empty `api_token`, an `api_host` that is not
+an IP address, and an unknown `vision_execution_mode` with HTTP 400. When the
+token is changed, the discovery file is updated straight away.
+
 ## Core Endpoints
 
 | Method | Path | Purpose |
@@ -48,6 +52,18 @@ Authorization: Bearer <token>
 | GET | `/api/v1/images/{id}/file` | Serve original file. |
 | GET | `/api/v1/images/{id}/thumb` | Serve thumbnail/poster. |
 | POST | `/api/v1/images/query` | Query/filter media. |
+| GET | `/api/v1/blocked` | Count of deleted items that are blocked. |
+| DELETE | `/api/v1/blocked` | Clear the blocked list. |
+
+Media rows include `caption_source` (`provider`, `ai`, `manual`, or empty when
+there is no caption or its origin was never recorded). A caption set with
+`PUT /api/v1/images/{id}` is recorded as `manual`.
+
+The file endpoints stream the file and honor `Range` requests (HTTP 206), so
+large videos can be fetched in pieces.
+
+Downloading a URL that was deleted from the library returns HTTP 409 with a
+message saying it is blocked.
 
 ## Search And Download Endpoints
 
@@ -61,6 +77,10 @@ Authorization: Bearer <token>
 | POST | `/api/v1/download/batch` | Download results as an async task. |
 | GET | `/api/v1/tasks/{task_id}` | Poll async task status. |
 
+Single-source searches return HTTP 502 with the provider's status when the
+provider call fails, instead of an empty result. Finished tasks stay readable
+for six hours (the most recent 200 are kept).
+
 ## Topic Endpoints
 
 | Method | Path | Purpose |
@@ -72,6 +92,12 @@ Authorization: Bearer <token>
 | POST | `/api/v1/topics/{topic_id}/more` | Fetch next topic page. |
 | POST | `/api/v1/topics/{topic_id}/reset` | Reset topic cursors. |
 | GET | `/api/v1/topics/{topic_id}/images` | List saved library IDs for topic. |
+| GET | `/api/v1/topics/{topic_id}/pending` | Fetched results not yet downloaded or dismissed. |
+| DELETE | `/api/v1/topics/{topic_id}/pending` | Dismiss the pending results. |
+
+Each entry in a `more` response's `progress` list has a `status` of `ok`,
+`empty`, or `error`. `error` carries a `message` and means the provider call
+failed; the cursor does not move, so the same page is fetched next time.
 
 ## Vision Endpoints
 
@@ -82,6 +108,13 @@ Authorization: Bearer <token>
 | POST | `/api/v1/vision/unload` | Unload workers. |
 | POST | `/api/v1/vision/analyze/{image_id}` | Analyze one library image. |
 | POST | `/api/v1/vision/analyze` | Analyze images by path or batch request. |
+
+Analysis requests accept `caption_mode` (`missing`, `short`, `overwrite`,
+`skip`), `caption_min_chars`, and `protect_manual` (default `true`: captions
+with `caption_source` `manual` are never replaced). The result reports
+`caption_written`, `caption_source`, and `tags_added`.
+
+`POST /api/v1/vision/unload` returns HTTP 409 while an analysis job is running.
 
 ## Combo Endpoints
 

@@ -1,5 +1,6 @@
 # Media Buddy
 
+[![Latest release](https://img.shields.io/github/v/release/aivrar/mediabuddy)](https://github.com/aivrar/mediabuddy/releases/latest)
 ![License: MIT](https://img.shields.io/github/license/aivrar/mediabuddy)
 ![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue)
 ![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131)
@@ -22,6 +23,9 @@ computer vision for captions and object tags.
 It is a Tauri 2 + SolidJS + Rust rewrite of the original Python ImageBuddy app.
 There is no Python runtime requirement.
 
+**Current version: [0.2.0](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.0)** · [What's new](docs/RELEASE_NOTES_0.2.0.md) ·
+[All releases](https://github.com/aivrar/mediabuddy/releases)
+
 ## Screenshots
 
 | Search | Library | Settings |
@@ -36,33 +40,40 @@ There is no Python runtime requirement.
 
 - Multi-source search across Pixabay, Pexels, and Unsplash.
 - Photo and video support, including preview posters for videos.
-- Persistent search topics with per-provider cursors.
-- Batch downloads with concurrency controls.
+- Persistent search topics with per-provider cursors. Fetched results wait
+  with the topic until you download or dismiss them.
+- Batch downloads with concurrency controls. Videos stream straight to disk.
 - Local library backed by SQLite WAL mode.
 - Rich metadata capture where providers expose it.
 - Large image/video inspector with editable caption and tags.
 - Florence-2 ONNX AI vision for captions and object tags.
+- Every caption records who wrote it (provider, AI, or typed by hand), and
+  captions typed by hand are protected from AI runs by default.
 - Dynamic GPU/CPU worker planning for Florence-2.
 - Built-in REST API for automation with bearer-token security.
 - Portable data folder beside the executable.
 
 ## Download And Run
 
-For normal users, publish the NSIS installer from:
+Download version 0.2.0 from the
+[v0.2.0 release page](https://github.com/aivrar/mediabuddy/releases/tag/v0.2.0):
 
-```text
-src-tauri/target/release/bundle/nsis/Media Buddy_0.1.0_x64-setup.exe
-```
+| File | Use it for |
+| --- | --- |
+| [Media.Buddy_0.2.0_x64-setup.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64-setup.exe) | Installer. Recommended for most people. |
+| [Media.Buddy_0.2.0_x64_en-US.msi](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/Media.Buddy_0.2.0_x64_en-US.msi) | MSI package, for environments that prefer MSI. |
+| [mediabuddy.exe](https://github.com/aivrar/mediabuddy/releases/download/v0.2.0/mediabuddy.exe) | Portable. No install; keeps its data beside the exe. |
 
-For portable testing, share:
-
-```text
-mediabuddy.exe
-```
+The [latest release](https://github.com/aivrar/mediabuddy/releases/latest) link always points at the newest version.
 
 When launched, the portable executable creates a sibling `data/` folder for
 settings, downloads, logs, the SQLite library, and Florence-2 model/runtime
-cache.
+cache. If that folder cannot be written to (for example an install under
+`C:\Program Files`), data goes to `%LOCALAPPDATA%\MediaBuddy\data` instead.
+
+Upgrading from 0.1.0: the library database is upgraded in place the first time
+0.2.0 opens it. Going back to 0.1.0 afterwards is not supported, so back up
+`data/` first if you may want to.
 
 ## First Run
 
@@ -101,12 +112,15 @@ token when one is configured.
 
 ## Documentation
 
-- Wiki pages: [docs/wiki/Home.md](docs/wiki/Home.md)
+- Wiki: [github.com/aivrar/mediabuddy/wiki](https://github.com/aivrar/mediabuddy/wiki)
+  (source in [docs/wiki/Home.md](docs/wiki/Home.md))
 - PDF-ready manual: [docs/MEDIA_BUDDY_MANUAL.md](docs/MEDIA_BUDDY_MANUAL.md)
 - PDF export notes: [docs/PDF_EXPORT.md](docs/PDF_EXPORT.md)
 - Screenshot checklist: [docs/wiki/Screenshot-Checklist.md](docs/wiki/Screenshot-Checklist.md)
 - Release checklist: [docs/wiki/Release-Checklist.md](docs/wiki/Release-Checklist.md)
-- Release notes: [docs/RELEASE_NOTES_0.1.0.md](docs/RELEASE_NOTES_0.1.0.md)
+- Release notes: [0.2.0](docs/RELEASE_NOTES_0.2.0.md),
+  [0.1.0](docs/RELEASE_NOTES_0.1.0.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
 - Security policy: [SECURITY.md](SECURITY.md)
 
 ## Build From Source
@@ -120,8 +134,8 @@ Requirements:
 - WebView2 Runtime, usually already present on Windows 10/11
 
 ```powershell
-# Clone this repository, then:
-cd ImageBuddy
+git clone https://github.com/aivrar/mediabuddy.git
+cd mediabuddy
 npm install
 npm run tauri dev
 npm run tauri build
@@ -136,8 +150,8 @@ src-tauri/target/release/mediabuddy.exe
 Installers:
 
 ```text
-src-tauri/target/release/bundle/nsis/Media Buddy_0.1.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/Media Buddy_0.1.0_x64_en-US.msi
+src-tauri/target/release/bundle/nsis/Media Buddy_0.2.0_x64-setup.exe
+src-tauri/target/release/bundle/msi/Media Buddy_0.2.0_x64_en-US.msi
 ```
 
 ## Data Layout

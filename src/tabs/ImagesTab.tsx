@@ -43,6 +43,7 @@ const DOWNLOAD_CONCURRENCY_KEY = "mediabuddy.download.concurrency.v1";
 const VISION_CAPTION_MODE_KEY = "mediabuddy.vision.captionMode.v1";
 const VISION_CAPTION_TASK_KEY = "mediabuddy.vision.captionTask.v1";
 const VISION_CAPTION_MIN_CHARS_KEY = "mediabuddy.vision.captionMinChars.v1";
+const VISION_PROTECT_MANUAL_KEY = "mediabuddy.vision.protectManual.v1";
 const VISION_DETECT_OBJECTS_KEY = "mediabuddy.vision.detectObjects.v1";
 const DEFAULT_VISION_CAPTION_MIN_CHARS = 80;
 
@@ -316,6 +317,8 @@ const ImagesTab: Component = () => {
     createSignal(loadVisionCaptionMinChars());
   const [visionDetectObjects, setVisionDetectObjectsState] =
     createSignal(loadVisionDetectObjects());
+  const [visionProtectManual, setVisionProtectManualState] =
+    createSignal(loadVisionProtectManual());
   const [inspectorId, setInspectorId] = createSignal<string | null>(null);
 
   const setVisionCaptionMode = (mode: VisionCaptionMode) => {
@@ -334,6 +337,10 @@ const ImagesTab: Component = () => {
   const setVisionDetectObjects = (value: boolean) => {
     setVisionDetectObjectsState(value);
     saveVisionDetectObjects(value);
+  };
+  const setVisionProtectManual = (value: boolean) => {
+    setVisionProtectManualState(value);
+    saveVisionProtectManual(value);
   };
 
   const refreshLibrary = async () => {
@@ -543,11 +550,15 @@ const ImagesTab: Component = () => {
         captionMode: visionCaptionMode(),
         captionTask: visionCaptionTask(),
         captionMinChars: visionCaptionMinChars(),
+        protectManual: visionProtectManual(),
         loadIfNeeded: true,
       });
+      // Only successful items carry the row as it was written. Anything else
+      // is left exactly as it is on screen, so an edit saved while the job
+      // was running is never replaced by an older copy.
       const updated = new Map(
         summary.results
-          .filter((r) => r.image)
+          .filter((r) => r.ok && r.image)
           .map((r) => [r.image!.id, r.image!])
       );
       if (updated.size > 0) {
@@ -584,27 +595,22 @@ const ImagesTab: Component = () => {
     const ids = Array.from(librarySelection());
     if (ids.length === 0) return;
     setBusy(true);
+    // The backend merges into the tags stored right now, so tags added
+    // elsewhere (an AI run, the REST API) since this list was loaded are
+    // kept. Rows are collected and applied in a single setImages so the
+    // filter/sort memos re-run once, including when a later item fails.
+    const saved = new Map<string, Image>();
     try {
-      const idSet = new Set(ids);
-      // Compute merged tags per selected image up front, persist each, then
-      // apply ALL changes in a single setImages — avoids rebuilding the whole
-      // images array (and re-running the filter/sort memos) once per item.
-      const merges = new Map<string, string[]>();
-      for (const img of images()) {
-        if (!idSet.has(img.id)) continue;
-        merges.set(img.id, Array.from(new Set([...img.tags, ...newTags])).sort());
+      for (const id of ids) {
+        const row = await api.appendImageTags(id, newTags);
+        if (row) saved.set(id, row);
       }
-      for (const [id, merged] of merges) {
-        await api.updateImage(id, { tags: merged });
-      }
-      setImages(
-        images().map((i) =>
-          merges.has(i.id) ? { ...i, tags: merges.get(i.id)! } : i
-        )
-      );
     } catch (e) {
       setLibError(String(e));
     } finally {
+      if (saved.size > 0) {
+        setImages(images().map((i) => saved.get(i.id) ?? i));
+      }
       setBusy(false);
     }
   };
@@ -881,11 +887,16 @@ const ImagesTab: Component = () => {
       });
       setCurrentTopic(topic);
 
+      // Results this topic fetched earlier that were never downloaded or
+      // dismissed come back first, so nothing is lost between sessions.
+      const carried = await loadPending(topic.id);
+
       const t0 = performance.now();
       const round = await api.topicGetMore(topic.id, resultsPerSource());
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-      setResults(round.results);
-      setSearchInspectorUrl(round.results[0]?.url ?? null);
+      const shown = mergeResults(carried, round.results);
+      setResults(shown);
+      setSearchInspectorUrl(shown[0]?.url ?? null);
       setLastProgress(round.progress);
 
       const ph = round.results.filter((x) => x.kind === "photo").length;
@@ -895,8 +906,13 @@ const ImagesTab: Component = () => {
           ? ` (${ph} photo${ph === 1 ? "" : "s"} + ${vd} video${vd === 1 ? "" : "s"})`
           : "";
       setSearchInfo(
-        `${round.results.length} new${breakdown} for "${q}" in ${elapsed}s`
+        `${round.results.length} new${breakdown} for "${q}" in ${elapsed}s${
+          carried.length > 0
+            ? ` · ${carried.length} waiting from earlier rounds`
+            : ""
+        }`
       );
+      setSearchError(progressErrorText(round.progress));
       await refreshTopicStatus(topic.id);
       await refreshTopicList();
     } catch (err) {
@@ -905,6 +921,61 @@ const ImagesTab: Component = () => {
       setSearching(false);
       refreshQuota();
       refreshSettings();
+    }
+  };
+
+  const loadPending = async (topicId: string): Promise<SearchResult[]> => {
+    try {
+      return await api.topicPending(topicId);
+    } catch {
+      return [];
+    }
+  };
+
+  const mergeResults = (a: SearchResult[], b: SearchResult[]) => {
+    const seen = new Set<string>();
+    const out: SearchResult[] = [];
+    for (const r of [...a, ...b]) {
+      if (seen.has(r.url)) continue;
+      seen.add(r.url);
+      out.push(r);
+    }
+    return out;
+  };
+
+  // A provider call that failed (rate limit, rejected key, outage) is not
+  // the same as a source running out. Say so; the page is retried next time.
+  const progressErrorText = (progress: TopicProgress[]): string | null => {
+    const failed = progress.filter((p) => p.status === "error");
+    if (failed.length === 0) return null;
+    const reasons = Array.from(
+      new Set(
+        failed.map((p) => p.message || `${p.source} ${p.media_kind} failed`)
+      )
+    );
+    return `${reasons.join("; ")}. Nothing was skipped — the same page is tried again on the next round.`;
+  };
+
+  const dismissResults = async () => {
+    const count = results().length;
+    if (count === 0) return;
+    const topic = currentTopic();
+    if (
+      !confirm(
+        `Dismiss ${count === 1 ? "this result" : `these ${count} results`}${
+          topic ? " and anything else still waiting for this topic" : ""
+        }? Dismissed results are not offered again unless the topic is reset.`
+      )
+    )
+      return;
+    try {
+      if (topic) await api.topicDismissPending(topic.id);
+      setResults([]);
+      setResultsSelection(new Set<string>());
+      setSearchInspectorUrl(null);
+      setSearchInfo("Results dismissed.");
+    } catch (e) {
+      setSearchError(String(e));
     }
   };
 
@@ -921,7 +992,7 @@ const ImagesTab: Component = () => {
       const round = await api.topicGetMore(topic.id, resultsPerSource());
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       // Merge: append, don't replace.
-      const merged = [...results(), ...round.results];
+      const merged = mergeResults(results(), round.results);
       setResults(merged);
       if (!searchInspectorUrl() && merged.length > 0) {
         setSearchInspectorUrl(merged[0].url);
@@ -932,6 +1003,7 @@ const ImagesTab: Component = () => {
       setSearchInfo(
         `+${newCount} new in ${elapsed}s${someExhausted ? " · some sources exhausted" : ""}`
       );
+      setSearchError(progressErrorText(round.progress));
       await refreshTopicStatus(topic.id);
       await refreshTopicList();
     } catch (err) {
@@ -1001,6 +1073,7 @@ const ImagesTab: Component = () => {
     let gathered = 0;
     let rounds = 0;
     let apiCalls = 0;
+    let lastErrors: string | null = null;
     const accumulated: SearchResult[] = [];
 
     try {
@@ -1018,6 +1091,7 @@ const ImagesTab: Component = () => {
             stillActive++;
           }
         }
+        lastErrors = progressErrorText(round.progress);
         accumulated.push(...round.results);
         gathered += round.results.length;
         setFillProgress({
@@ -1035,7 +1109,7 @@ const ImagesTab: Component = () => {
         // hammering providers in a tight loop.
         await new Promise((r) => setTimeout(r, 75));
       }
-      setResults([...results(), ...accumulated]);
+      setResults(mergeResults(results(), accumulated));
       if (!searchInspectorUrl() && accumulated.length > 0) {
         setSearchInspectorUrl(accumulated[0].url);
       }
@@ -1043,7 +1117,10 @@ const ImagesTab: Component = () => {
         ? "stopped"
         : gathered >= target
           ? "target reached"
-          : "all sources exhausted";
+          : lastErrors
+            ? "stopped on provider errors"
+            : "all sources exhausted";
+      if (lastErrors) setSearchError(lastErrors);
       setSearchInfo(
         `Fill: +${gathered} new in ${rounds} round${rounds === 1 ? "" : "s"} · ${apiCalls} API call${apiCalls === 1 ? "" : "s"} · ${stoppedReason}`
       );
@@ -1085,10 +1162,16 @@ const ImagesTab: Component = () => {
         saveSourceSet(enabled);
       }
       setSearchKind((st.topic.kind as SearchKindParam) || "photo");
-      setResults([]);
-      setSearchInspectorUrl(null);
+      const carried = await loadPending(id);
+      setResults(carried);
+      setResultsSelection(new Set<string>());
+      setSearchInspectorUrl(carried[0]?.url ?? null);
       setLastProgress(null);
-      setSearchInfo(null);
+      setSearchInfo(
+        carried.length > 0
+          ? `${carried.length} result${carried.length === 1 ? "" : "s"} waiting from earlier rounds.`
+          : null
+      );
       setSearchError(null);
     } catch (err) {
       setSearchError(String(err));
@@ -1383,6 +1466,14 @@ const ImagesTab: Component = () => {
               >
                 Download all
               </button>
+              <button
+                type="button"
+                onClick={() => void dismissResults()}
+                disabled={busy()}
+                title="Remove these results without downloading them. They are not offered again unless the topic is reset."
+              >
+                Dismiss all
+              </button>
             </div>
           </div>
 
@@ -1550,10 +1641,12 @@ const ImagesTab: Component = () => {
                 visionCaptionTask={visionCaptionTask()}
                 visionCaptionMinChars={visionCaptionMinChars()}
                 visionDetectObjects={visionDetectObjects()}
+                visionProtectManual={visionProtectManual()}
                 onVisionCaptionModeChange={setVisionCaptionMode}
                 onVisionCaptionTaskChange={setVisionCaptionTask}
                 onVisionCaptionMinCharsChange={setVisionCaptionMinChars}
                 onVisionDetectObjectsChange={setVisionDetectObjects}
+                onVisionProtectManualChange={setVisionProtectManual}
                 onSelectAll={selectAllLibrary}
                 onClear={clearLibrarySel}
                 onDelete={deleteSelected}
@@ -1668,15 +1761,20 @@ const ImagesTab: Component = () => {
                 visionCaptionTask={visionCaptionTask()}
                 visionCaptionMinChars={visionCaptionMinChars()}
                 visionDetectObjects={visionDetectObjects()}
+                visionProtectManual={visionProtectManual()}
                 onVisionCaptionModeChange={setVisionCaptionMode}
                 onVisionCaptionTaskChange={setVisionCaptionTask}
                 onVisionCaptionMinCharsChange={setVisionCaptionMinChars}
                 onVisionDetectObjectsChange={setVisionDetectObjects}
+                onVisionProtectManualChange={setVisionProtectManual}
                 onAnalyze={() => runVisionForIds([img().id])}
                 onSave={async (patch) => {
                   try {
-                    await api.updateImage(img().id, patch);
-                    updateImageInPlace(img().id, patch);
+                    const saved = await api.updateImage(img().id, patch);
+                    if (!saved) {
+                      throw new Error("This item is no longer in the library.");
+                    }
+                    updateImageInPlace(saved.id, saved);
                   } catch (e) {
                     setLibError(String(e));
                     throw e; // let the Inspector know the save failed
@@ -2037,10 +2135,12 @@ const VisionOptionsControls: Component<{
   captionTask: VisionCaptionTask;
   captionMinChars: number;
   detectObjects: boolean;
+  protectManual: boolean;
   onCaptionModeChange: (value: VisionCaptionMode) => void;
   onCaptionTaskChange: (value: VisionCaptionTask) => void;
   onCaptionMinCharsChange: (value: number) => void;
   onDetectObjectsChange: (value: boolean) => void;
+  onProtectManualChange: (value: boolean) => void;
 }> = (props) => (
   <div class="vision-options">
     <label class="vision-option">
@@ -2093,8 +2193,35 @@ const VisionOptionsControls: Component<{
       />
       <span>Objects</span>
     </label>
+    <label
+      class="vision-toggle"
+      title="Never replace a caption that was typed by hand, whatever the caption mode. Turn off to let Replace short / Overwrite replace those too."
+    >
+      <input
+        type="checkbox"
+        checked={props.protectManual}
+        disabled={props.disabled || props.captionMode === "skip"}
+        onChange={(e) => props.onProtectManualChange(e.currentTarget.checked)}
+      />
+      <span>Keep manual</span>
+    </label>
   </div>
 );
+
+/** Who wrote the caption shown in the Inspector. */
+function captionSourceLabel(image: Image): string {
+  if (!image.alt) return "no caption";
+  switch (image.caption_source) {
+    case "provider":
+      return `${image.source} (provider)`;
+    case "ai":
+      return "AI (Florence-2)";
+    case "manual":
+      return "typed by hand";
+    default:
+      return "not recorded";
+  }
+}
 
 const BulkBar: Component<{
   selectedCount: number;
@@ -2106,10 +2233,12 @@ const BulkBar: Component<{
   visionCaptionTask: VisionCaptionTask;
   visionCaptionMinChars: number;
   visionDetectObjects: boolean;
+  visionProtectManual: boolean;
   onVisionCaptionModeChange: (value: VisionCaptionMode) => void;
   onVisionCaptionTaskChange: (value: VisionCaptionTask) => void;
   onVisionCaptionMinCharsChange: (value: number) => void;
   onVisionDetectObjectsChange: (value: boolean) => void;
+  onVisionProtectManualChange: (value: boolean) => void;
   onSelectAll: () => void;
   onClear: () => void;
   onDelete: () => void;
@@ -2138,10 +2267,12 @@ const BulkBar: Component<{
           captionTask={props.visionCaptionTask}
           captionMinChars={props.visionCaptionMinChars}
           detectObjects={props.visionDetectObjects}
+          protectManual={props.visionProtectManual}
           onCaptionModeChange={props.onVisionCaptionModeChange}
           onCaptionTaskChange={props.onVisionCaptionTaskChange}
           onCaptionMinCharsChange={props.onVisionCaptionMinCharsChange}
           onDetectObjectsChange={props.onVisionDetectObjectsChange}
+          onProtectManualChange={props.onVisionProtectManualChange}
         />
         <Show when={props.selectedCount > 0}>
           <input
@@ -2209,10 +2340,12 @@ const Inspector: Component<{
   visionCaptionTask: VisionCaptionTask;
   visionCaptionMinChars: number;
   visionDetectObjects: boolean;
+  visionProtectManual: boolean;
   onVisionCaptionModeChange: (value: VisionCaptionMode) => void;
   onVisionCaptionTaskChange: (value: VisionCaptionTask) => void;
   onVisionCaptionMinCharsChange: (value: number) => void;
   onVisionDetectObjectsChange: (value: boolean) => void;
+  onVisionProtectManualChange: (value: boolean) => void;
   onAnalyze: () => void;
   onSave: (patch: { alt?: string; tags?: string[] }) => Promise<void>;
   onDelete: () => Promise<void>;
@@ -2226,15 +2359,24 @@ const Inspector: Component<{
   // <Show> stays truthy), so reset the edit fields whenever the inspected
   // image changes — otherwise a Save writes the previous image's edits onto
   // the newly-shown image's row.
+  //
+  // When the SAME image gets new saved values (an AI result landing, or an
+  // edit made elsewhere), a field is refreshed only if the user has not
+  // touched it. Text that is typed but not yet saved is never thrown away.
   createEffect(
     on(
-      () => [props.image.id, props.image.alt, props.image.tags.join("\u0000")],
-      () => {
-        setAlt(props.image.alt);
-        setTagsRaw(props.image.tags.join(", "));
-        setSavedTick(false);
-      },
-      { defer: true }
+      () =>
+        [props.image.id, props.image.alt, props.image.tags.join(", ")] as const,
+      ([id, nextAlt, nextTags], prev) => {
+        if (!prev || prev[0] !== id) {
+          setAlt(nextAlt);
+          setTagsRaw(nextTags);
+          setSavedTick(false);
+          return;
+        }
+        if (alt() === prev[1]) setAlt(nextAlt);
+        if (tagsRaw() === prev[2]) setTagsRaw(nextTags);
+      }
     )
   );
 
@@ -2255,7 +2397,19 @@ const Inspector: Component<{
         .split(",")
         .map((t) => t.trim())
         .filter((t) => t.length > 0);
-      await props.onSave({ alt: alt(), tags });
+      // Send only what changed. Saving tags must not re-send the caption:
+      // an unchanged caption keeps its recorded origin, and a field the user
+      // didn't touch can't overwrite a newer value.
+      const patch: { alt?: string; tags?: string[] } = {};
+      if (alt() !== props.image.alt) patch.alt = alt();
+      if (tags.join("\u0000") !== props.image.tags.join("\u0000")) {
+        patch.tags = tags;
+      }
+      if (patch.alt !== undefined || patch.tags !== undefined) {
+        await props.onSave(patch);
+      }
+      // Show the tags as they were stored (trimmed, empties removed).
+      setTagsRaw(tags.join(", "));
       setSavedTick(true);
       setTimeout(() => setSavedTick(false), 1500);
     } finally {
@@ -2363,7 +2517,9 @@ const Inspector: Component<{
             <span class="mono-cell">{props.image.color}</span>
           </dd>
         </Show>
-        <dt>AI captioned</dt>
+        <dt>Caption by</dt>
+        <dd>{captionSourceLabel(props.image)}</dd>
+        <dt>AI analyzed</dt>
         <dd>{props.image.vision_processed ? "yes" : "no"}</dd>
       </dl>
 
@@ -2390,10 +2546,12 @@ const Inspector: Component<{
           captionTask={props.visionCaptionTask}
           captionMinChars={props.visionCaptionMinChars}
           detectObjects={props.visionDetectObjects}
+          protectManual={props.visionProtectManual}
           onCaptionModeChange={props.onVisionCaptionModeChange}
           onCaptionTaskChange={props.onVisionCaptionTaskChange}
           onCaptionMinCharsChange={props.onVisionCaptionMinCharsChange}
           onDetectObjectsChange={props.onVisionDetectObjectsChange}
+          onProtectManualChange={props.onVisionProtectManualChange}
         />
         <div class="inspector-actions">
           <button
@@ -3527,3 +3685,18 @@ function saveVisionDetectObjects(value: boolean) {
 }
 
 export default ImagesTab;
+
+function loadVisionProtectManual(): boolean {
+  try {
+    // On unless the user has explicitly switched it off.
+    return localStorage.getItem(VISION_PROTECT_MANUAL_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function saveVisionProtectManual(value: boolean) {
+  try {
+    localStorage.setItem(VISION_PROTECT_MANUAL_KEY, String(value));
+  } catch {}
+}

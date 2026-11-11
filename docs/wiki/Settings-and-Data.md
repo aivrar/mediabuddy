@@ -16,6 +16,12 @@ Main settings include:
 - Unsplash detail threshold.
 - Florence-2 load mode and worker limits.
 
+The **Library** section shows how many deleted items are blocked from search
+and download, and has **Clear blocked list** to allow them again.
+
+Settings changed through the REST API are checked first: an empty token, a host
+that is not an IP address, or an unknown execution mode is rejected.
+
 ## Themes
 
 The app includes multiple themes. Theme choice is local and can be changed from
@@ -51,10 +57,15 @@ data/
 `-- images.db-wal
 ```
 
+If the folder beside the executable cannot be written to, the same layout is
+created under `%LOCALAPPDATA%\MediaBuddy\data`. The folder in use is written
+to the log at startup.
+
 ## Backups
 
 To back up a portable library, close Media Buddy and copy the entire `data/`
-folder.
+folder. Do this before upgrading to a new version: a newer version may upgrade
+the database, and going back to the older version afterwards is not supported.
 
 To reset the app, close Media Buddy and move or delete `data/`.
 

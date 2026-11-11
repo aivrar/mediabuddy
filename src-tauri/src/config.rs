@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+/// Held across every "read settings, change them, write them back" sequence
+/// (desktop Settings tab and the REST settings endpoints alike). Without it
+/// two writers can interleave: both read the same starting point and the
+/// second save silently discards the first one's change.
+pub static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn default_theme() -> String {
     "dark".into()
 }

@@ -16,6 +16,7 @@ use axum::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, RwLock};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use uuid::Uuid;
@@ -33,6 +34,12 @@ const MAX_ANALYZE_ITEMS: usize = 1000;
 const MAX_PER_SOURCE: u32 = 200;
 /// Hard cap on download fan-out (keeps `Semaphore::new` from panicking).
 const MAX_CONCURRENCY: usize = 64;
+/// Finished tasks kept for `/tasks/{id}` polling; older ones are dropped.
+const MAX_FINISHED_TASKS: usize = 200;
+/// How long a finished task stays readable.
+const TASK_RETENTION_SECS: u64 = 6 * 60 * 60;
+/// Read size when streaming a media file to a REST client.
+const FILE_CHUNK_BYTES: usize = 256 * 1024;
 
 use crate::api_keys::{self, Provider as ApiKeyProvider};
 use crate::config::Settings;
@@ -47,7 +54,7 @@ use crate::system_monitor::SystemMonitor;
 use crate::topics::{self, TopicStore};
 use crate::types::Image;
 use crate::vision::{
-    caption_task_from_name, parse_caption_write_mode, should_write_caption, CaptionWriteMode,
+    caption_task_from_name, parse_caption_write_mode, CaptionPolicy, CaptionWriteMode,
     DetectedObject, Precision, VisionAnalysisOptions, VisionExecutionMode, VisionLoadOptions,
     VisionRegistry,
 };
@@ -65,6 +72,8 @@ pub struct ApiContext {
     pub system: Arc<SystemMonitor>,
     pub tasks: Arc<TaskTracker>,
     pub started_at: Arc<RwLock<Option<u64>>>,
+    /// `(host, port)` the server is listening on, `None` while stopped.
+    pub bound: Arc<RwLock<Option<(String, u16)>>>,
     pub vision: Arc<VisionRegistry>,
     pub quota: Arc<QuotaTracker>,
     pub topics: Arc<TopicStore>,
@@ -134,6 +143,10 @@ pub struct ApiServer {
     handle: Mutex<Option<RunningHandle>>,
     pub tasks: Arc<TaskTracker>,
     pub started_at: Arc<RwLock<Option<u64>>>,
+    /// `(host, port)` the server is listening on, `None` while stopped.
+    /// Shared with `ApiContext` so a settings change can refresh the
+    /// discovery file with the address that is really in use.
+    pub bound: Arc<RwLock<Option<(String, u16)>>>,
 }
 
 struct RunningHandle {
@@ -157,6 +170,7 @@ impl ApiServer {
             handle: Mutex::new(None),
             tasks: Arc::new(TaskTracker::new()),
             started_at: Arc::new(RwLock::new(None)),
+            bound: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -219,6 +233,8 @@ impl ApiServer {
 
         let started_at = self.started_at.clone();
         *started_at.write().await = Some(now_secs());
+        let bound = self.bound.clone();
+        *bound.write().await = Some((host.clone(), bound_port));
 
         let join = tokio::spawn(async move {
             let server = axum::serve(
@@ -232,6 +248,7 @@ impl ApiServer {
                 tracing::error!("API server error: {err}");
             }
             *started_at.write().await = None;
+            *bound.write().await = None;
         });
 
         *guard = Some(RunningHandle {
@@ -294,7 +311,9 @@ impl TaskTracker {
             error: None,
             result: None,
         };
-        self.inner.lock().await.insert(id.clone(), info);
+        let mut map = self.inner.lock().await;
+        prune_finished_tasks(&mut map, now_secs());
+        map.insert(id.clone(), info);
         id
     }
 
@@ -328,6 +347,28 @@ impl TaskTracker {
 
     pub async fn get(&self, id: &str) -> Option<TaskInfo> {
         self.inner.lock().await.get(id).cloned()
+    }
+}
+
+/// Drop finished tasks that are too old, then the oldest finished ones beyond
+/// the cap. Running and queued tasks are never dropped. Without this a
+/// long-running server keeps every task — and its full result payload —
+/// forever.
+fn prune_finished_tasks(map: &mut HashMap<String, TaskInfo>, now: u64) {
+    map.retain(|_, task| match task.completed_at {
+        Some(done) => now.saturating_sub(done) < TASK_RETENTION_SECS,
+        None => true,
+    });
+    let mut finished: Vec<(u64, String)> = map
+        .values()
+        .filter_map(|task| task.completed_at.map(|done| (done, task.id.clone())))
+        .collect();
+    if finished.len() > MAX_FINISHED_TASKS {
+        finished.sort();
+        let surplus = finished.len() - MAX_FINISHED_TASKS;
+        for (_, id) in finished.into_iter().take(surplus) {
+            map.remove(&id);
+        }
     }
 }
 
@@ -521,6 +562,10 @@ fn build_router(ctx: ApiContext, cors_enabled: bool, bound_loopback: bool) -> Ro
                 .put(handle_update_image),
         )
         .route("/api/v1/images/delete", post(handle_batch_delete))
+        .route(
+            "/api/v1/blocked",
+            get(handle_blocked_status).delete(handle_clear_blocked),
+        )
         .route("/api/v1/images/{image_id}/file", get(handle_image_file))
         .route("/api/v1/images/{image_id}/thumb", get(handle_image_thumb))
         .route("/api/v1/images/query", post(handle_query_images))
@@ -552,6 +597,10 @@ fn build_router(ctx: ApiContext, cors_enabled: bool, bound_loopback: bool) -> Ro
         .route(
             "/api/v1/topics/{topic_id}/images",
             get(handle_topic_image_ids),
+        )
+        .route(
+            "/api/v1/topics/{topic_id}/pending",
+            get(handle_topic_pending).delete(handle_topic_dismiss_pending),
         )
         // Vision
         .route("/api/v1/vision/status", get(handle_vision_status))
@@ -807,6 +856,34 @@ fn api_route_docs() -> Vec<ApiRouteDoc> {
             example_body: None,
         },
         ApiRouteDoc {
+            method: "GET",
+            path: "/api/v1/topics/{topic_id}/pending",
+            description: "Results the topic fetched that are not yet downloaded or dismissed.",
+            auth_required: true,
+            example_body: None,
+        },
+        ApiRouteDoc {
+            method: "DELETE",
+            path: "/api/v1/topics/{topic_id}/pending",
+            description: "Dismiss the topic's pending results (they stay marked as seen).",
+            auth_required: true,
+            example_body: None,
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/api/v1/blocked",
+            description: "Count of deleted items kept out of search results and downloads.",
+            auth_required: true,
+            example_body: None,
+        },
+        ApiRouteDoc {
+            method: "DELETE",
+            path: "/api/v1/blocked",
+            description: "Clear the blocked list so deleted items can be downloaded again.",
+            auth_required: true,
+            example_body: None,
+        },
+        ApiRouteDoc {
             method: "POST",
             path: "/api/v1/vision/load",
             description: "Load Florence-2 workers.",
@@ -818,10 +895,10 @@ fn api_route_docs() -> Vec<ApiRouteDoc> {
         ApiRouteDoc {
             method: "POST",
             path: "/api/v1/vision/analyze/{image_id}",
-            description: "Analyze one library image using caption policy and object detection.",
+            description: "Analyze one library image using caption policy and object detection. Captions with caption_source 'manual' are kept unless protect_manual is false.",
             auth_required: true,
             example_body: Some(
-                json!({"detect_objects": true, "caption_mode": "missing", "caption_task": "detailed", "caption_min_chars": 80}),
+                json!({"detect_objects": true, "caption_mode": "missing", "caption_task": "detailed", "caption_min_chars": 80, "protect_manual": true}),
             ),
         },
         ApiRouteDoc {
@@ -997,11 +1074,52 @@ struct SettingsPatch {
     api_token: Option<String>,
 }
 
+const VISION_EXECUTION_MODES: [&str; 5] = ["auto", "cpu", "directml", "dml", "cuda"];
+
+/// Reject values that would leave the server unusable or unauthenticated.
+/// Runs before anything is written.
+fn validate_settings_patch(body: &SettingsPatch, current: &Settings) -> Result<(), String> {
+    if let Some(token) = body.api_token.as_deref() {
+        if token.trim().is_empty() {
+            return Err(
+                "api_token cannot be empty: that would switch off authentication for this API"
+                    .into(),
+            );
+        }
+    }
+    if let Some(mode) = body.vision_execution_mode.as_deref() {
+        let mode = mode.trim().to_ascii_lowercase();
+        if !VISION_EXECUTION_MODES.contains(&mode.as_str()) {
+            return Err(format!(
+                "vision_execution_mode must be one of: {}",
+                VISION_EXECUTION_MODES.join(", ")
+            ));
+        }
+    }
+    if let Some(host) = body.api_host.as_deref() {
+        let port = body.api_port.unwrap_or(current.api_port);
+        if format!("{}:{port}", host.trim())
+            .parse::<SocketAddr>()
+            .is_err()
+        {
+            return Err(
+                "api_host must be an IP address such as 127.0.0.1 (write IPv6 as [::1])".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn handle_update_settings(
     State(ctx): State<ApiContext>,
     Json(body): Json<SettingsPatch>,
 ) -> Response {
+    // One settings write at a time, shared with the desktop Settings tab.
+    let _save = crate::config::SAVE_LOCK.lock().await;
     let mut next = ctx.settings.read().await.clone();
+    if let Err(message) = validate_settings_patch(&body, &next) {
+        return err(StatusCode::BAD_REQUEST, message);
+    }
     if let Some(v) = body.pixabay_key {
         next.pixabay_key = v;
     }
@@ -1024,7 +1142,7 @@ async fn handle_update_settings(
         next.vision_allow_cpu = v;
     }
     if let Some(v) = body.vision_execution_mode {
-        next.vision_execution_mode = v;
+        next.vision_execution_mode = v.trim().to_ascii_lowercase();
     }
     if let Some(v) = body.vision_cpu_instances {
         next.vision_cpu_instances = v.clamp(1, 64);
@@ -1042,7 +1160,7 @@ async fn handle_update_settings(
         next.vision_reserved_vram = v.clamp(0.0, 256.0);
     }
     if let Some(v) = body.api_host {
-        next.api_host = v;
+        next.api_host = v.trim().to_string();
     }
     if let Some(v) = body.api_port {
         next.api_port = v;
@@ -1057,13 +1175,17 @@ async fn handle_update_settings(
         next.unsplash_detail_threshold = v.clamp(1, 200);
     }
     if let Some(v) = body.api_token {
-        next.api_token = v;
+        next.api_token = v.trim().to_string();
     }
 
     if let Err(e) = next.save(&ctx.paths.config_file) {
         return internal(e);
     }
     *ctx.settings.write().await = next.clone();
+    // The token (and possibly host/port for the next start) changed: keep
+    // the discovery file in step with what the running server accepts.
+    let bound = ctx.bound.read().await.clone();
+    crate::republish_discovery(ctx.paths.as_ref(), &next, bound);
     ok(settings_view(&next))
 }
 
@@ -1088,6 +1210,7 @@ async fn handle_validate_api_key(
     });
     let probe = api_keys::probe(&ctx.http, body.provider, &key, Some(&ctx.quota)).await;
     if body.save && probe.valid {
+        let _save = crate::config::SAVE_LOCK.lock().await;
         let mut next = ctx.settings.read().await.clone();
         match body.provider {
             ApiKeyProvider::Pixabay => next.pixabay_key = key,
@@ -1335,29 +1458,34 @@ async fn handle_update_image(
     if body.alt.is_none() && body.tags.is_none() {
         return err(StatusCode::BAD_REQUEST, "No updates provided");
     }
+    // A caption set here counts as written by a person (caption_source
+    // "manual"), so later AI runs leave it alone unless told otherwise.
     let mgr = ctx.image_manager.clone();
-    let id_for_update = image_id.clone();
     let updated_res = tokio::task::spawn_blocking(move || {
-        mgr.update_image_metadata(&id_for_update, body.alt, body.tags, None)
+        mgr.update_image_metadata(&image_id, body.alt, body.tags)
     })
     .await;
-    let updated = match updated_res {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => return internal(e),
-        Err(e) => return internal(e),
-    };
-    if !updated {
-        return err(StatusCode::NOT_FOUND, "Image not found");
-    }
-    let mgr = ctx.image_manager.clone();
-    let id_for_get = image_id.clone();
-    match tokio::task::spawn_blocking(move || mgr.get_image_by_id(&id_for_get)).await {
+    match updated_res {
         Ok(Ok(Some(img))) => ok(img),
         Ok(Ok(None)) => err(StatusCode::NOT_FOUND, "Image not found"),
-        _ => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to fetch updated image",
-        ),
+        Ok(Err(e)) => internal(e),
+        Err(e) => internal(e),
+    }
+}
+
+async fn handle_blocked_status(State(ctx): State<ApiContext>) -> Response {
+    ok(json!({ "blocked": ctx.image_manager.blocked_count() }))
+}
+
+async fn handle_clear_blocked(State(ctx): State<ApiContext>) -> Response {
+    let mgr = ctx.image_manager.clone();
+    match tokio::task::spawn_blocking(move || mgr.clear_blocked()).await {
+        Ok(Ok(cleared)) => {
+            tracing::info!("REST cleared the blocked list: {cleared} item(s)");
+            ok(json!({ "cleared": cleared }))
+        }
+        Ok(Err(e)) => internal(e),
+        Err(e) => internal(e),
     }
 }
 
@@ -1385,18 +1513,55 @@ async fn handle_batch_delete(
 async fn handle_image_file(
     State(ctx): State<ApiContext>,
     AxumPath(image_id): AxumPath<String>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    serve_image_file(&ctx, &image_id, false).await
+    serve_image_file(&ctx, &image_id, false, range_header(&headers)).await
 }
 
 async fn handle_image_thumb(
     State(ctx): State<ApiContext>,
     AxumPath(image_id): AxumPath<String>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    serve_image_file(&ctx, &image_id, true).await
+    serve_image_file(&ctx, &image_id, true, range_header(&headers)).await
 }
 
-async fn serve_image_file(ctx: &ApiContext, image_id: &str, thumb_only: bool) -> Response {
+fn range_header(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+/// Stream `remaining` bytes of `file` from its current position in chunks,
+/// so a large video is never held in memory in one piece.
+fn file_chunks(
+    file: tokio::fs::File,
+    remaining: u64,
+) -> impl futures_util::Stream<Item = std::io::Result<bytes::Bytes>> {
+    futures_util::stream::unfold((file, remaining), |(mut file, remaining)| async move {
+        if remaining == 0 {
+            return None;
+        }
+        let want = remaining.min(FILE_CHUNK_BYTES as u64) as usize;
+        let mut buf = vec![0u8; want];
+        match file.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok(bytes::Bytes::from(buf)), (file, remaining - n as u64)))
+            }
+            Err(e) => Some((Err(e), (file, 0))),
+        }
+    })
+}
+
+async fn serve_image_file(
+    ctx: &ApiContext,
+    image_id: &str,
+    thumb_only: bool,
+    range: Option<String>,
+) -> Response {
     let mgr = ctx.image_manager.clone();
     let id = image_id.to_string();
     let image = match tokio::task::spawn_blocking(move || mgr.get_image_by_id(&id)).await {
@@ -1415,18 +1580,65 @@ async fn serve_image_file(ctx: &ApiContext, image_id: &str, thumb_only: bool) ->
     if rel.is_empty() {
         return err(StatusCode::NOT_FOUND, "No file for image");
     }
-    let full = ctx.paths.root.join(&rel);
-    let bytes = match tokio::fs::read(&full).await {
-        Ok(b) => b,
+    // Same containment check the desktop app uses: the stored path must
+    // resolve to a real file inside the data directory.
+    let root = ctx.paths.root.clone();
+    let rel_for_resolve = rel.clone();
+    let full = match tokio::task::spawn_blocking(move || {
+        crate::resolve_library_media_path(&root, &rel_for_resolve)
+    })
+    .await
+    {
+        Ok(Ok(path)) => path,
+        Ok(Err(reason)) => {
+            tracing::warn!("REST media path rejected for {image_id}: {reason}");
+            return err(StatusCode::NOT_FOUND, "File not on disk");
+        }
+        Err(e) => return internal(e),
+    };
+    let mut file = match tokio::fs::File::open(&full).await {
+        Ok(f) => f,
         Err(_) => return err(StatusCode::NOT_FOUND, "File not on disk"),
     };
-    let mime = mime_for(&rel);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
+    let len = match file.metadata().await {
+        Ok(meta) => meta.len(),
+        Err(_) => return err(StatusCode::NOT_FOUND, "File not on disk"),
+    };
+
+    let (status, start, nbytes) = match range.as_deref() {
+        Some(raw) => match crate::parse_media_range(raw, len) {
+            Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end + 1 - start),
+            None => {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+                    .body(Body::empty())
+                    .unwrap_or_else(|_| {
+                        err(StatusCode::INTERNAL_SERVER_ERROR, "Response build failed")
+                    });
+            }
+        },
+        None => (StatusCode::OK, 0, len),
+    };
+    if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "File read failed");
+    }
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, mime_for(&rel))
+        .header(header::CONTENT_LENGTH, nbytes.to_string())
+        .header(header::ACCEPT_RANGES, "bytes")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::from(bytes))
+        .header(header::CACHE_CONTROL, "no-store");
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{}/{len}", start + nbytes - 1),
+        );
+    }
+    builder
+        .body(Body::from_stream(file_chunks(file, nbytes)))
         .unwrap_or_else(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "Response build failed"))
 }
 
@@ -1798,13 +2010,19 @@ async fn handle_search_one_source(
             "source": source,
             "query": query,
         })),
+        // `Other` here is the provider's HTTP status with a short hint
+        // (e.g. rate limit reached) — safe and useful to pass on.
+        Err(crate::error::AppError::Other(message)) => {
+            tracing::warn!("REST search failed: {message}");
+            err(StatusCode::BAD_GATEWAY, message)
+        }
         Err(e) => internal(e),
     }
 }
 
 // ---------- Download ----------
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct DownloadSingleBody {
     url: String,
     #[serde(default)]
@@ -1819,7 +2037,47 @@ struct DownloadSingleBody {
     alt: String,
     #[serde(default)]
     preview_only: bool,
+    #[serde(default)]
+    source_id: String,
+    #[serde(default)]
+    source_page_url: String,
+    #[serde(default)]
+    urls: Value,
+    #[serde(default)]
+    width: Option<i64>,
+    #[serde(default)]
+    height: Option<i64>,
+    #[serde(default)]
+    duration_secs: Option<i64>,
+    #[serde(default)]
+    file_size: Option<i64>,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    blur_hash: Option<String>,
+    #[serde(default)]
+    author_name: String,
+    #[serde(default)]
+    author_url: String,
+    #[serde(default)]
+    author_avatar: String,
+    #[serde(default)]
+    views: Option<i64>,
+    #[serde(default)]
+    downloads: Option<i64>,
+    #[serde(default)]
+    likes: Option<i64>,
+    #[serde(default)]
+    comments: Option<i64>,
+    #[serde(default)]
+    ai_generated: Option<bool>,
+    #[serde(default)]
+    created_at_provider: Option<String>,
+    #[serde(default)]
+    source_data: Value,
 }
+
+const URL_BLOCKED_MESSAGE: &str = "This item was deleted and is on the blocked list. Clear the blocked list (DELETE /api/v1/blocked) to download it again.";
 
 fn default_api_source() -> String {
     "API".into()
@@ -1857,6 +2115,34 @@ fn infer_download_kind(url: &str, requested: Option<&str>) -> &'static str {
     }
 }
 
+fn single_download_result(body: &DownloadSingleBody) -> SearchResult {
+    let kind = infer_download_kind(&body.url, body.kind.as_deref());
+    let mut result = SearchResult::empty(&body.source, kind, &body.query);
+    result.source_id = body.source_id.clone();
+    result.source_page_url = body.source_page_url.clone();
+    result.url = body.url.clone();
+    result.urls = body.urls.clone();
+    result.tags = body.tags.clone();
+    result.alt = body.alt.clone();
+    result.width = body.width;
+    result.height = body.height;
+    result.duration_secs = body.duration_secs;
+    result.file_size = body.file_size;
+    result.color = body.color.clone();
+    result.blur_hash = body.blur_hash.clone();
+    result.author_name = body.author_name.clone();
+    result.author_url = body.author_url.clone();
+    result.author_avatar = body.author_avatar.clone();
+    result.views = body.views;
+    result.downloads = body.downloads;
+    result.likes = body.likes;
+    result.comments = body.comments;
+    result.ai_generated = body.ai_generated;
+    result.created_at_provider = body.created_at_provider.clone();
+    result.source_data = body.source_data.clone();
+    result
+}
+
 async fn handle_download_single(
     State(ctx): State<ApiContext>,
     Json(body): Json<DownloadSingleBody>,
@@ -1864,14 +2150,13 @@ async fn handle_download_single(
     if body.url.is_empty() {
         return err(StatusCode::BAD_REQUEST, "URL required");
     }
+    if ctx.image_manager.is_url_blocked(&body.url) {
+        return err(StatusCode::CONFLICT, URL_BLOCKED_MESSAGE);
+    }
     if ctx.image_manager.is_url_saved(&body.url) {
         return err(StatusCode::CONFLICT, "Image already exists");
     }
-    let kind = infer_download_kind(&body.url, body.kind.as_deref());
-    let mut result = SearchResult::empty(&body.source, kind, &body.query);
-    result.url = body.url;
-    result.tags = body.tags;
-    result.alt = body.alt;
+    let result = single_download_result(&body);
     match downloader::download_one(
         &ctx.download_http,
         &ctx.image_manager,
@@ -1937,6 +2222,8 @@ fn spawn_download_task(
     concurrency: usize,
 ) {
     tokio::spawn(async move {
+        // Counts as running work until the whole batch is done.
+        let _active = downloader::DownloadGuard::new();
         tasks.set_running(&task_id).await;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(
             concurrency.clamp(1, MAX_CONCURRENCY),
@@ -2162,6 +2449,38 @@ async fn handle_topic_image_ids(
     }
 }
 
+async fn handle_topic_pending(
+    State(ctx): State<ApiContext>,
+    AxumPath(topic_id): AxumPath<String>,
+) -> Response {
+    let store = ctx.topics.clone();
+    let manager = ctx.image_manager.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.pending_results(&topic_id, &manager, topics::MAX_PENDING_RESULTS)
+    })
+    .await
+    {
+        Ok(Ok(results)) => {
+            let count = results.len();
+            ok(json!({ "results": results, "count": count }))
+        }
+        Ok(Err(e)) => internal(e),
+        Err(e) => internal(e),
+    }
+}
+
+async fn handle_topic_dismiss_pending(
+    State(ctx): State<ApiContext>,
+    AxumPath(topic_id): AxumPath<String>,
+) -> Response {
+    let store = ctx.topics.clone();
+    match tokio::task::spawn_blocking(move || store.dismiss_pending(&topic_id)).await {
+        Ok(Ok(dismissed)) => ok(json!({ "dismissed": dismissed })),
+        Ok(Err(e)) => internal(e),
+        Err(e) => internal(e),
+    }
+}
+
 // ---------- Vision (Florence-2) ----------
 
 async fn handle_vision_status(State(ctx): State<ApiContext>) -> Response {
@@ -2271,7 +2590,12 @@ async fn handle_vision_load(
 }
 
 async fn handle_vision_unload(State(ctx): State<ApiContext>) -> Response {
-    ctx.vision.unload_all();
+    if !ctx.vision.try_unload() {
+        return err(
+            StatusCode::CONFLICT,
+            "Vision model is busy analyzing; unload again when the running job finishes",
+        );
+    }
     let st = ctx.vision.status();
     ok(json!({
         "ready": st.loaded,
@@ -2300,13 +2624,15 @@ struct VisionAnalyzeBody {
     caption_task: Option<String>,
     #[serde(default)]
     caption_min_chars: Option<usize>,
+    /// Keep captions a person wrote, whatever the mode. Defaults to true.
+    #[serde(default)]
+    protect_manual: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
 struct RestVisionAnalyzeOptions {
     detect_objects: bool,
-    caption_mode: CaptionWriteMode,
-    caption_min_chars: usize,
+    caption_policy: CaptionPolicy,
     caption_task: Option<String>,
 }
 
@@ -2315,8 +2641,11 @@ fn rest_vision_options(body: &VisionAnalyzeBody) -> RestVisionAnalyzeOptions {
         parse_caption_write_mode(body.caption_mode.as_deref(), body.overwrite_caption);
     RestVisionAnalyzeOptions {
         detect_objects: body.detect_objects.unwrap_or(true),
-        caption_mode,
-        caption_min_chars: body.caption_min_chars.unwrap_or(80).clamp(1, 1000),
+        caption_policy: CaptionPolicy {
+            mode: caption_mode,
+            min_chars: body.caption_min_chars.unwrap_or(80).clamp(1, 1000),
+            protect_manual: body.protect_manual.unwrap_or(true),
+        },
         caption_task: (caption_mode != CaptionWriteMode::Skip)
             .then(|| caption_task_from_name(body.caption_task.as_deref()).to_string()),
     }
@@ -2354,6 +2683,7 @@ async fn handle_vision_analyze_path(
         _ => return err(StatusCode::NOT_FOUND, "file not found"),
     };
     let options = rest_vision_options(&body);
+    let _job = ctx.vision.begin_job();
     let vision = ctx.vision.clone();
     let analysis = tokio::task::spawn_blocking(move || {
         vision.analyse_with_options(
@@ -2402,32 +2732,14 @@ impl ApiFlowError {
 #[derive(Debug, Clone, Serialize)]
 struct VisionAnalyzeOutput {
     image_id: String,
+    /// What Florence-2 generated (not necessarily what is stored).
     caption: String,
+    /// Whether the generated caption replaced the stored one.
+    caption_written: bool,
+    /// Origin of the caption now stored: provider | ai | manual | "".
+    caption_source: String,
+    tags_added: Vec<String>,
     objects: Vec<DetectedObject>,
-}
-
-fn merge_vision_tags(existing: &[String], objects: &[DetectedObject]) -> Vec<String> {
-    let mut out = Vec::with_capacity(existing.len() + objects.len());
-    let mut seen = std::collections::BTreeSet::new();
-    for tag in existing {
-        let trimmed = tag.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if seen.insert(trimmed.to_ascii_lowercase()) {
-            out.push(trimmed.to_string());
-        }
-    }
-    for object in objects {
-        let label = object.label.trim();
-        if label.is_empty() {
-            continue;
-        }
-        if seen.insert(label.to_ascii_lowercase()) {
-            out.push(label.to_string());
-        }
-    }
-    out
 }
 
 fn image_is_analyzable(image: &Image) -> bool {
@@ -2458,10 +2770,20 @@ async fn analyze_image_by_id(
             "vision analysis currently supports image files, not videos".into(),
         ));
     }
-    let abs_path = ctx.paths.root.join(&img.path);
-    if !abs_path.exists() {
-        return Err(ApiFlowError::NotFound("image file missing on disk".into()));
-    }
+    // Same containment check the desktop app uses.
+    let root = ctx.paths.root.clone();
+    let rel = img.path.clone();
+    let abs_path =
+        match tokio::task::spawn_blocking(move || crate::resolve_library_media_path(&root, &rel))
+            .await
+        {
+            Ok(Ok(path)) => path,
+            Ok(Err(reason)) => {
+                tracing::warn!("vision path rejected for {image_id}: {reason}");
+                return Err(ApiFlowError::NotFound("image file missing on disk".into()));
+            }
+            Err(e) => return Err(ApiFlowError::Internal(e.to_string())),
+        };
 
     let vision = ctx.vision.clone();
     let analysis_path = abs_path.clone();
@@ -2490,39 +2812,39 @@ async fn analyze_image_by_id(
         Err(e) => return Err(ApiFlowError::Internal(e.to_string())),
     };
 
-    let caption_for_db = should_write_caption(
-        options.caption_mode,
-        &img.alt,
-        &result.caption,
-        options.caption_min_chars,
-    )
-    .then_some(result.caption.clone());
-    let tag_set = merge_vision_tags(&img.tags, &result.objects);
-    let tag_patch = if tag_set == img.tags {
-        None
-    } else {
-        Some(tag_set)
-    };
+    // Inference took a while; the row may have been edited or deleted since
+    // it was read above. `apply_vision_result` re-reads it under the database
+    // lock and decides against what is there now.
+    let labels: Vec<String> = result
+        .objects
+        .iter()
+        .map(|object| object.label.clone())
+        .collect();
     let mgr2 = ctx.image_manager.clone();
     let id2 = image_id.clone();
-    let updated = tokio::task::spawn_blocking(move || {
-        mgr2.update_image_metadata(&id2, caption_for_db, tag_patch, Some(true))
+    let generated = result.caption.clone();
+    let policy = options.caption_policy;
+    let applied = tokio::task::spawn_blocking(move || {
+        mgr2.apply_vision_result(&id2, &generated, &labels, &policy)
     })
     .await;
-    match updated {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => {
+    let outcome = match applied {
+        Ok(Ok(Some(outcome))) => outcome,
+        Ok(Ok(None)) => {
             return Err(ApiFlowError::NotFound(
                 "image disappeared before metadata update".into(),
             ))
         }
         Ok(Err(e)) => return Err(ApiFlowError::Internal(e.to_string())),
         Err(e) => return Err(ApiFlowError::Internal(e.to_string())),
-    }
+    };
 
     Ok(VisionAnalyzeOutput {
         image_id,
         caption: result.caption,
+        caption_written: outcome.caption_written,
+        caption_source: outcome.image.caption_source,
+        tags_added: outcome.tags_added,
         objects: result.objects,
     })
 }
@@ -2534,6 +2856,7 @@ async fn handle_vision_analyze_image(
 ) -> Response {
     let Json(body) = body.unwrap_or_default();
     let options = rest_vision_options(&body);
+    let _job = ctx.vision.begin_job();
     match analyze_image_by_id(&ctx, image_id, options).await {
         Ok(result) => ok(result),
         Err(e) => e.into_response(),
@@ -2730,6 +3053,9 @@ async fn spawn_analyze_ids_task(
                 .await;
             return;
         }
+        // Held until this task's last image is done, so no other task (or
+        // an unload request) removes the model part-way through.
+        let job = ctx.vision.begin_job();
         let loaded_by_task = match ensure_vision_ready(&ctx, &options).await {
             Ok(v) => v,
             Err(e) => {
@@ -2745,9 +3071,9 @@ async fn spawn_analyze_ids_task(
             options.analyze,
         )
         .await;
-        if options.unload_after {
-            ctx.vision.unload_all();
-        }
+        // Unload only if no other analysis job still needs the model.
+        drop(job);
+        let unloaded = options.unload_after && ctx.vision.try_unload();
         tasks
             .complete(
                 &task_id_for_spawn,
@@ -2755,7 +3081,7 @@ async fn spawn_analyze_ids_task(
                     "analyzed": analysis.len(),
                     "failed": failures.len(),
                     "loaded_by_task": loaded_by_task,
-                    "unloaded": options.unload_after,
+                    "unloaded": unloaded,
                     "analysis": analysis,
                     "failures": failures,
                 })),
@@ -2815,7 +3141,7 @@ async fn handle_combo_search_download(
             .into_iter()
             .filter(|r| {
                 !manager.is_url_saved(&r.url)
-                    && !manager.is_source_id_saved(&r.source, &r.source_id)
+                    && !manager.is_source_id_saved(&r.source, &r.kind, &r.source_id)
             })
             .take(limit)
             .collect();
@@ -2867,6 +3193,8 @@ struct ComboDownloadAnalyzeBody {
     #[serde(default)]
     caption_min_chars: Option<usize>,
     #[serde(default)]
+    protect_manual: Option<bool>,
+    #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
     unload_after: Option<bool>,
@@ -2881,6 +3209,7 @@ struct WorkflowAnalyzeInput {
     caption_mode: Option<String>,
     caption_task: Option<String>,
     caption_min_chars: Option<usize>,
+    protect_manual: Option<bool>,
 }
 
 fn workflow_options(
@@ -2898,6 +3227,7 @@ fn workflow_options(
         caption_mode: analyze.caption_mode,
         caption_task: analyze.caption_task,
         caption_min_chars: analyze.caption_min_chars,
+        protect_manual: analyze.protect_manual,
     };
     VisionWorkflowOptions {
         analyze: rest_vision_options(&body),
@@ -2929,6 +3259,9 @@ async fn handle_combo_download_analyze(
             "download-analyze requires preview_only=false so the original file can be analyzed",
         );
     }
+    if ctx.image_manager.is_url_blocked(&body.url) {
+        return err(StatusCode::CONFLICT, URL_BLOCKED_MESSAGE);
+    }
     if ctx.image_manager.is_url_saved(&body.url) {
         return err(StatusCode::CONFLICT, "Image already exists");
     }
@@ -2943,6 +3276,7 @@ async fn handle_combo_download_analyze(
             caption_mode: body.caption_mode,
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
+            protect_manual: body.protect_manual,
         },
         body.load_if_needed,
         body.unload_after,
@@ -2972,6 +3306,7 @@ async fn handle_combo_download_analyze(
                 }
             };
         tasks.bump(&task_id_for_spawn, 1).await;
+        let job = ctx.vision.begin_job();
         match ensure_vision_ready(&ctx, &options).await {
             Ok(_) => {}
             Err(e) => {
@@ -2988,16 +3323,16 @@ async fn handle_combo_download_analyze(
                 }
             };
         tasks.bump(&task_id_for_spawn, 1).await;
-        if options.unload_after {
-            ctx.vision.unload_all();
-        }
+        // Unload only if no other analysis job still needs the model.
+        drop(job);
+        let unloaded = options.unload_after && ctx.vision.try_unload();
         tasks
             .complete(
                 &task_id_for_spawn,
                 Some(json!({
                     "saved": 1,
                     "analyzed": 1,
-                    "unloaded": options.unload_after,
+                    "unloaded": unloaded,
                     "image": downloaded,
                     "analysis": analysis,
                 })),
@@ -3028,6 +3363,8 @@ struct ComboAnalyzeBody {
     caption_task: Option<String>,
     #[serde(default)]
     caption_min_chars: Option<usize>,
+    #[serde(default)]
+    protect_manual: Option<bool>,
     #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
@@ -3082,6 +3419,7 @@ async fn handle_combo_analyze_unprocessed(
             caption_mode: body.caption_mode,
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
+            protect_manual: body.protect_manual,
         },
         body.load_if_needed,
         body.unload_after,
@@ -3113,6 +3451,7 @@ async fn handle_combo_smart_analyze(
             caption_mode: body.caption_mode,
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
+            protect_manual: body.protect_manual,
         },
         Some(true),
         body.unload_after,
@@ -3154,6 +3493,8 @@ struct ComboSearchDownloadAnalyzeBody {
     #[serde(default)]
     caption_min_chars: Option<usize>,
     #[serde(default)]
+    protect_manual: Option<bool>,
+    #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
     unload_after: Option<bool>,
@@ -3191,6 +3532,7 @@ async fn handle_combo_search_download_analyze(
             caption_mode: body.caption_mode,
             caption_task: body.caption_task,
             caption_min_chars: body.caption_min_chars,
+            protect_manual: body.protect_manual,
         },
         body.load_if_needed,
         body.unload_after,
@@ -3224,7 +3566,7 @@ async fn handle_combo_search_download_analyze(
                 !ctx.image_manager.is_url_saved(&r.url)
                     && !ctx
                         .image_manager
-                        .is_source_id_saved(&r.source, &r.source_id)
+                        .is_source_id_saved(&r.source, &r.kind, &r.source_id)
             })
             .take(limit)
             .collect();
@@ -3238,6 +3580,7 @@ async fn handle_combo_search_download_analyze(
         )
         .await;
         tasks.bump(&task_id_for_spawn, saved.len() as u32).await;
+        let job = ctx.vision.begin_job();
         match ensure_vision_ready(&ctx, &options).await {
             Ok(_) => {}
             Err(e) => {
@@ -3254,9 +3597,9 @@ async fn handle_combo_search_download_analyze(
             options.analyze,
         )
         .await;
-        if options.unload_after {
-            ctx.vision.unload_all();
-        }
+        // Unload only if no other analysis job still needs the model.
+        drop(job);
+        let unloaded = options.unload_after && ctx.vision.try_unload();
         tasks
             .complete(
                 &task_id_for_spawn,
@@ -3265,7 +3608,7 @@ async fn handle_combo_search_download_analyze(
                     "saved": saved.len(),
                     "analyzed": analysis.len(),
                     "failed": failures.len(),
-                    "unloaded": options.unload_after,
+                    "unloaded": unloaded,
                     "images": saved,
                     "analysis": analysis,
                     "failures": failures,
@@ -3282,6 +3625,41 @@ async fn handle_combo_search_download_analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_download_preserves_provider_provenance() {
+        let body: DownloadSingleBody = serde_json::from_value(json!({
+            "url": "https://cdn.example.test/video.mp4",
+            "source": "Pixabay",
+            "source_id": "10339",
+            "source_page_url": "https://pixabay.com/videos/id-10339/",
+            "query": "night sky",
+            "kind": "video",
+            "tags": ["stars", "mountains"],
+            "alt": "Milky Way over mountains",
+            "width": 1620,
+            "height": 1080,
+            "duration_secs": 13,
+            "author_name": "5239640",
+            "author_url": "https://pixabay.com/users/5239640/",
+            "ai_generated": false,
+            "source_data": {"provider_rank": 1}
+        }))
+        .expect("valid single-download request");
+
+        let result = single_download_result(&body);
+        assert_eq!(result.kind, "video");
+        assert_eq!(result.source, "Pixabay");
+        assert_eq!(result.source_id, "10339");
+        assert_eq!(
+            result.source_page_url,
+            "https://pixabay.com/videos/id-10339/"
+        );
+        assert_eq!(result.author_name, "5239640");
+        assert_eq!(result.duration_secs, Some(13));
+        assert_eq!(result.ai_generated, Some(false));
+        assert_eq!(result.source_data["provider_rank"], 1);
+    }
 
     fn image(id: &str, kind: &str, path: &str, vision_processed: bool) -> Image {
         Image {
@@ -3301,6 +3679,7 @@ mod tests {
             file_size: Some(1024),
             query: "sunset beach".into(),
             alt: String::new(),
+            caption_source: String::new(),
             tags: vec!["beach".into(), "warm".into()],
             color: None,
             blur_hash: None,
@@ -3321,26 +3700,93 @@ mod tests {
     }
 
     #[test]
-    fn merge_vision_tags_preserves_existing_and_dedupes_objects() {
+    fn merge_label_tags_preserves_existing_and_dedupes_objects() {
         let existing = vec!["Beach".into(), " warm ".into(), "beach".into()];
-        let objects = vec![
-            DetectedObject {
-                label: "person".into(),
-                bbox: [0.0, 0.0, 1.0, 1.0],
-            },
-            DetectedObject {
-                label: "Person".into(),
-                bbox: [1.0, 1.0, 2.0, 2.0],
-            },
-            DetectedObject {
-                label: " ".into(),
-                bbox: [0.0, 0.0, 0.0, 0.0],
-            },
-        ];
-        assert_eq!(
-            merge_vision_tags(&existing, &objects),
-            vec!["Beach", "warm", "person"]
+        let labels = vec!["person".to_string(), "Person".into(), " ".into()];
+        let (merged, added) = crate::image_manager::merge_label_tags(&existing, &labels);
+        assert_eq!(merged, vec!["Beach", "warm", "person"]);
+        assert_eq!(added, vec!["person"]);
+    }
+
+    fn settings_patch(value: Value) -> SettingsPatch {
+        serde_json::from_value(value).expect("valid settings patch")
+    }
+
+    #[test]
+    fn settings_patch_rejects_values_that_break_the_server() {
+        let current = Settings::default();
+        assert!(
+            validate_settings_patch(&settings_patch(json!({"api_token": "  "})), &current).is_err()
         );
+        assert!(validate_settings_patch(
+            &settings_patch(json!({"api_host": "not a host"})),
+            &current
+        )
+        .is_err());
+        assert!(validate_settings_patch(
+            &settings_patch(json!({"vision_execution_mode": "quantum"})),
+            &current
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn settings_patch_accepts_sane_values() {
+        let current = Settings::default();
+        for patch in [
+            json!({}),
+            json!({"api_token": "a-long-enough-token"}),
+            json!({"api_host": "0.0.0.0", "api_port": 5001}),
+            json!({"api_host": "[::1]"}),
+            json!({"vision_execution_mode": "DirectML"}),
+        ] {
+            assert!(
+                validate_settings_patch(&settings_patch(patch.clone()), &current).is_ok(),
+                "{patch}"
+            );
+        }
+    }
+
+    fn finished_task(id: &str, completed_at: u64) -> TaskInfo {
+        TaskInfo {
+            id: id.into(),
+            task_type: "t".into(),
+            status: "completed".into(),
+            progress: 1,
+            total: 1,
+            started_at: completed_at,
+            completed_at: Some(completed_at),
+            error: None,
+            result: None,
+        }
+    }
+
+    #[test]
+    fn finished_tasks_are_pruned_but_running_ones_are_kept() {
+        let now = 1_000_000u64;
+        let mut map: HashMap<String, TaskInfo> = HashMap::new();
+        // Too old.
+        map.insert(
+            "old".into(),
+            finished_task("old", now - TASK_RETENTION_SECS - 1),
+        );
+        // More recent finished tasks than the cap allows.
+        for i in 0..(MAX_FINISHED_TASKS + 10) {
+            let id = format!("t{i}");
+            map.insert(id.clone(), finished_task(&id, now - 1000 + i as u64));
+        }
+        let mut running = finished_task("running", now - TASK_RETENTION_SECS * 2);
+        running.completed_at = None;
+        running.status = "running".into();
+        map.insert("running".into(), running);
+
+        prune_finished_tasks(&mut map, now);
+        assert!(!map.contains_key("old"));
+        assert!(map.contains_key("running"));
+        // Oldest of the recent ones went first; the newest survive.
+        assert!(!map.contains_key("t0"));
+        assert!(map.contains_key(&format!("t{}", MAX_FINISHED_TASKS + 9)));
+        assert_eq!(map.len(), MAX_FINISHED_TASKS + 1);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 const NATIVE_BACKEND_UNAVAILABLE =
   "Native backend unavailable. Open Media Buddy through the desktop app instead of the Vite browser preview.";
@@ -40,6 +41,8 @@ export type Image = {
   file_size: number | null;
   query: string;
   alt: string;
+  /** Who wrote `alt`: "provider" | "ai" | "manual" | "" (none / not recorded). */
+  caption_source: string;
   tags: string[];
   color: string | null;
   blur_hash: string | null;
@@ -51,6 +54,7 @@ export type Image = {
   likes: number | null;
   comments: number | null;
   preview_only: boolean;
+  /** Florence-2 has analyzed this item. Not the same as "caption is AI-written". */
   vision_processed: boolean;
   ai_generated: boolean | null;
   created_at_provider: string | null;
@@ -271,6 +275,7 @@ export type TopicCursor = {
   source: string;
   media_kind: string;
   next_page: number;
+  item_offset?: number | null;
   total_seen: number;
   last_status: string;
   last_fetched_at: string | null;
@@ -302,7 +307,23 @@ export type TopicProgress = {
   raw_count: number;
   kept_count: number;
   status: string;
+  /** Why the fetch failed, when status is "error". */
+  message?: string | null;
 };
+
+/** Work that quitting now would cut off. */
+export type ActiveWork = { downloads: number; analyses: number };
+
+/**
+ * Fires when the window's close button is pressed while downloads or an
+ * analysis job are running. Resolves to an unsubscribe function.
+ */
+export function onCloseBlocked(
+  handler: (work: ActiveWork) => void
+): Promise<() => void> {
+  if (!hasTauriInvoke()) return Promise.resolve(() => {});
+  return listen<ActiveWork>("close-blocked", (event) => handler(event.payload));
+}
 
 export type TopicGetMoreResult = {
   topic_id: string;
@@ -314,8 +335,15 @@ export const api = {
   listImages: () => invoke<Image[]>("list_images"),
   deleteImages: (ids: string[]) => invoke<DeleteResult>("delete_images", { ids }),
   isUrlSaved: (url: string) => invoke<boolean>("is_url_saved", { url }),
+  /** Resolves to the saved row, or null if the item no longer exists. */
   updateImage: (id: string, patch: { alt?: string; tags?: string[] }) =>
-    invoke<boolean>("update_image", { id, alt: patch.alt, tags: patch.tags }),
+    invoke<Image | null>("update_image", { id, alt: patch.alt, tags: patch.tags }),
+  /** Adds tags to whatever is stored now. Resolves to the saved row, or null
+   *  if the item no longer exists. */
+  appendImageTags: (id: string, tags: string[]) =>
+    invoke<Image | null>("append_image_tags", { id, tags }),
+  blockedCount: () => invoke<number>("blocked_count"),
+  clearBlocked: () => invoke<number>("clear_blocked"),
   // searchImages: legacy single-shot search; superseded by Topics
   // (topicFindOrCreate + topicGetMore). The underlying Tauri command is
   // still registered for backwards-compat with external automation scripts.
@@ -353,11 +381,18 @@ export const api = {
     invoke<string[]>("topic_image_ids", { topicId }),
   topicRename: (topicId: string, name: string | null) =>
     invoke<void>("topic_rename", { topicId, name }),
+  /** Results fetched earlier for this topic, not yet downloaded or dismissed. */
+  topicPending: (topicId: string) =>
+    invoke<SearchResult[]>("topic_pending", { topicId }),
+  topicDismissPending: (topicId: string) =>
+    invoke<number>("topic_dismiss_pending", { topicId }),
   getSystemStats: () => invoke<SystemStats>("get_system_stats"),
   apiStatus: () => invoke<ApiServerStatus>("api_status"),
   apiStart: () => invoke<ApiServerStatus>("api_start"),
   apiStop: () => invoke<ApiServerStatus>("api_stop"),
   shutdownApp: () => invoke<void>("shutdown_app"),
+  activeWork: () => invoke<ActiveWork>("active_work"),
+  closeWarningAck: () => invoke<void>("close_warning_ack"),
   getLogs: (since?: number, level?: string) =>
     invoke<LogEntry[]>("get_logs", { query: { since, level } }),
   clearLogs: () => invoke<void>("clear_logs"),
@@ -388,6 +423,8 @@ export const api = {
       captionMode?: "missing" | "short" | "overwrite" | "skip";
       captionTask?: "caption" | "detailed" | "more_detailed";
       captionMinChars?: number;
+      /** Keep captions typed by hand, whatever the mode. Defaults to true. */
+      protectManual?: boolean;
       loadIfNeeded?: boolean;
       concurrency?: number;
     }
@@ -400,6 +437,7 @@ export const api = {
         caption_mode: options?.captionMode,
         caption_task: options?.captionTask,
         caption_min_chars: options?.captionMinChars,
+        protect_manual: options?.protectManual ?? true,
         load_if_needed: options?.loadIfNeeded ?? true,
         concurrency: options?.concurrency,
       },

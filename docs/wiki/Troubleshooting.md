@@ -22,6 +22,19 @@
 - Reduce filters such as orientation or safe-search behavior.
 - Check quota.
 
+## A Topic Shows A Provider Error
+
+- Read the reason shown with the error: rate limit reached, key rejected, or
+  the provider is having problems.
+- Wait and run the topic again. The failed page is retried; nothing is skipped.
+- A source is only marked exhausted when the provider really has no more
+  results. Reset the topic to start it over.
+
+## A Deleted Item Never Comes Back In Search
+
+- Deleted items are blocked on purpose, including after a restart.
+- Use **Settings -> Library -> Clear blocked list** to allow them again.
+
 ## Download Is Slow Or Fails
 
 - Lower download concurrency if providers throttle requests.
@@ -53,9 +66,25 @@
 - Try CPU mode as a baseline.
 - Check the Log tab and GitHub issue template for useful report details.
 
+## AI Did Not Replace A Caption
+
+- Check **Caption by** in the inspector. A caption typed by hand is kept while
+  **Keep manual** is on.
+- Check the caption mode: Missing only and Replace short leave longer captions
+  alone.
+
+## The Window Asks Before Closing
+
+- A download or an analysis job is still running. Let it finish, or confirm to
+  quit anyway.
+
 ## REST API Requests Fail
 
 - Open the API tab and confirm the server is running.
 - Use the current token from the API tab.
 - Include `Authorization: Bearer <token>` for non-status endpoints.
 - Confirm the host and port match Settings.
+- HTTP 409 from a download means the URL was deleted from the library and is
+  blocked. HTTP 409 from vision unload means an analysis job is running.
+- HTTP 502 from a single-source search means the provider call failed; the
+  message carries the provider's status.

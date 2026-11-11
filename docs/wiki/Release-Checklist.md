@@ -7,8 +7,12 @@
   staged.
 - Update `CHANGELOG.md`.
 - Update README screenshots.
-- Confirm `src-tauri/tauri.conf.json`, `package.json`, and
-  `src-tauri/Cargo.toml` agree on version.
+- Confirm `src-tauri/tauri.conf.json`, `package.json`, `package-lock.json`,
+  `src-tauri/Cargo.toml`, and `src-tauri/Cargo.lock` agree on version. The
+  footer in the app reads its version from `package.json`.
+- Add `docs/RELEASE_NOTES_<version>.md` and update the version, download
+  links, and installer names in `README.md`, `SECURITY.md`,
+  `docs/MEDIA_BUDDY_MANUAL.md`, and `docs/wiki/`.
 
 ## Validation
 
@@ -30,9 +34,17 @@ npm run tauri build -- --bundles nsis,msi
 Attach:
 
 ```text
-src-tauri/target/release/bundle/nsis/Media Buddy_0.1.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/Media Buddy_0.1.0_x64_en-US.msi
+src-tauri/target/release/bundle/nsis/Media Buddy_0.2.0_x64-setup.exe
+src-tauri/target/release/bundle/msi/Media Buddy_0.2.0_x64_en-US.msi
 src-tauri/target/release/mediabuddy.exe
+```
+
+GitHub replaces the spaces in uploaded file names with dots, so the download
+links use:
+
+```text
+Media.Buddy_0.2.0_x64-setup.exe
+Media.Buddy_0.2.0_x64_en-US.msi
 ```
 
 ## Hashes
@@ -41,8 +53,8 @@ Generate hashes:
 
 ```powershell
 Get-FileHash "src-tauri\target\release\mediabuddy.exe" -Algorithm SHA256
-Get-FileHash "src-tauri\target\release\bundle\nsis\Media Buddy_0.1.0_x64-setup.exe" -Algorithm SHA256
-Get-FileHash "src-tauri\target\release\bundle\msi\Media Buddy_0.1.0_x64_en-US.msi" -Algorithm SHA256
+Get-FileHash "src-tauri\target\release\bundle\nsis\Media Buddy_0.2.0_x64-setup.exe" -Algorithm SHA256
+Get-FileHash "src-tauri\target\release\bundle\msi\Media Buddy_0.2.0_x64_en-US.msi" -Algorithm SHA256
 ```
 
 ## GitHub Release Notes
@@ -63,3 +75,5 @@ Include:
 - Confirm first-run Settings flow.
 - Confirm API docs open.
 - Confirm screenshots render in README.
+- Confirm the README download links and release badge open the new release.
+- Copy `docs/wiki/` to the GitHub Wiki repository.

@@ -36,11 +36,14 @@
 3. Select an item to open the inspector.
 4. Edit caption or tags.
 5. Save metadata changes.
-6. Run AI caption/tag tools when needed.
+6. Run AI caption/tag tools when needed. Captions you typed are kept unless
+   **Keep manual** is switched off.
 
 ## Where Data Goes
 
-Portable builds create a sibling `data/` folder beside the executable. Source
-development builds use the app-specific data root resolved by the Tauri app.
+Media Buddy creates a `data/` folder beside the executable. That includes
+source development builds, where the executable is under `src-tauri/target/`.
+If the folder beside the executable cannot be written to, data goes to
+`%LOCALAPPDATA%\MediaBuddy\data` instead.
 
 Do not commit or publish `data/`.

@@ -1,5 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
 import { api, type SystemStats } from "../lib/api";
+import { version as APP_VERSION } from "../../package.json";
 import "./SystemFooter.css";
 
 const POLL_MS = 1500;
@@ -40,7 +41,7 @@ const SystemFooter: Component = () => {
     <footer class="system-footer">
       <div class="footer-meta">
         <span class="footer-app-name">Media Buddy</span>
-        <span class="footer-version">v0.1.0</span>
+        <span class="footer-version">v{APP_VERSION}</span>
       </div>
 
       <div class="footer-stats">

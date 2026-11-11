@@ -18,13 +18,15 @@ mod vision;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use futures_util::{stream, StreamExt};
 use serde::Serialize;
 use serde_json::json;
 use tauri::http::{header, Request, Response, StatusCode};
+use tauri::{Emitter, Manager};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -40,9 +42,8 @@ use crate::system_monitor::{SystemMonitor, SystemStats};
 use crate::topics::{Topic, TopicGetMoreResult, TopicStatus, TopicStore, TopicSummary};
 use crate::types::{DeleteResult, Image};
 use crate::vision::{
-    caption_task_from_name, parse_caption_write_mode, should_write_caption, CaptionWriteMode,
-    Precision, VisionAnalysisOptions, VisionExecutionMode, VisionLoadOptions, VisionRegistry,
-    VisionStatus,
+    caption_task_from_name, parse_caption_write_mode, CaptionPolicy, CaptionWriteMode, Precision,
+    VisionAnalysisOptions, VisionExecutionMode, VisionLoadOptions, VisionRegistry, VisionStatus,
 };
 
 pub struct AppState {
@@ -73,6 +74,7 @@ impl AppState {
             system: self.system.clone(),
             tasks: self.api_server.tasks.clone(),
             started_at: self.api_server.started_at.clone(),
+            bound: self.api_server.bound.clone(),
             vision: self.vision.clone(),
             quota: self.quota.clone(),
             topics: self.topics.clone(),
@@ -119,6 +121,27 @@ fn app_dir_for_discovery() -> String {
         .to_string()
 }
 
+fn discovery_base_url(bound_host: &str, port: u16) -> String {
+    let host = bound_host.trim();
+    let advertised = match host.to_ascii_lowercase().as_str() {
+        "" | "0.0.0.0" | "::" | "[::]" | "localhost" | "::1" | "[::1]" => "127.0.0.1".to_string(),
+        _ if host.contains(':') && !host.starts_with('[') => format!("[{host}]"),
+        _ => host.to_string(),
+    };
+    format!("http://{advertised}:{port}")
+}
+
+fn discovery_is_specific_non_loopback(bound_host: &str) -> bool {
+    let host = bound_host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => !ip.is_loopback() && !ip.is_unspecified(),
+        Err(_) => false,
+    }
+}
+
 fn publish_discovery(
     paths: &AppPaths,
     settings: &Settings,
@@ -127,21 +150,59 @@ fn publish_discovery(
     let Some(port) = status.port else {
         return Ok(());
     };
+    let bound_host = status.host.as_deref().unwrap_or(settings.api_host.as_str());
+    write_discovery(paths, settings, bound_host, port)
+}
+
+/// Rewrite the discovery file after settings change while the REST server is
+/// running, so tools that read it don't keep using a token that no longer
+/// works. `bound` is the address the server is actually listening on (the
+/// host/port in `settings` only take effect at the next start); `None` means
+/// the server is stopped and there is nothing to publish.
+pub(crate) fn republish_discovery(
+    paths: &AppPaths,
+    settings: &Settings,
+    bound: Option<(String, u16)>,
+) {
+    let Some((host, port)) = bound else {
+        return;
+    };
+    if let Err(e) = write_discovery(paths, settings, &host, port) {
+        tracing::warn!("could not refresh MediaBuddy discovery registry: {e}");
+    }
+}
+
+fn write_discovery(
+    paths: &AppPaths,
+    settings: &Settings,
+    bound_host: &str,
+    port: u16,
+) -> Result<(), String> {
     let dir = apphub_registry_dir()
         .ok_or_else(|| "could not resolve AppHub registry directory".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("mediabuddy.json");
-    let api = format!("http://127.0.0.1:{port}");
+    let api = discovery_base_url(bound_host, port);
+    let mut endpoints = json!({
+        "api": api,
+        "status": format!("{api}/api/v1/status")
+    });
+    if matches!(
+        bound_host.trim().to_ascii_lowercase().as_str(),
+        "" | "0.0.0.0" | "::" | "[::]" | "127.0.0.1" | "localhost" | "::1" | "[::1]"
+    ) {
+        endpoints["localhost_api"] = json!(format!("http://127.0.0.1:{port}"));
+    }
+    if discovery_is_specific_non_loopback(bound_host) {
+        endpoints["wsl_api"] = json!(api);
+    }
     let payload = json!({
         "name": "mediabuddy",
         "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
         "started_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         "app_dir": app_dir_for_discovery(),
-        "endpoints": {
-            "api": api,
-            "status": format!("http://127.0.0.1:{port}/api/v1/status")
-        },
+        "endpoints": endpoints,
         "auth": {
             "header": "Authorization",
             "scheme": "Bearer",
@@ -158,7 +219,7 @@ fn publish_discovery(
             ],
             "data_root": paths.root.to_string_lossy().to_string(),
             "models_dir": paths.models.to_string_lossy().to_string(),
-            "api_host": status.host.clone().unwrap_or_else(|| settings.api_host.clone())
+            "api_host": bound_host
         }
     });
     let body = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
@@ -224,12 +285,49 @@ async fn update_image(
     alt: Option<String>,
     tags: Option<Vec<String>>,
     state: tauri::State<'_, AppState>,
-) -> Result<bool, String> {
+) -> Result<Option<Image>, String> {
+    // Returns the row as saved (with its caption origin), or `None` if the
+    // item no longer exists.
     let mgr = state.image_manager.clone();
-    tokio::task::spawn_blocking(move || mgr.update_image_metadata(&id, alt, tags, None))
+    tokio::task::spawn_blocking(move || mgr.update_image_metadata(&id, alt, tags))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+}
+
+/// Add tags to an item, merging into the tags stored right now rather than
+/// a list the window loaded earlier. Returns the saved row, or `None` if the
+/// item no longer exists.
+#[tauri::command]
+async fn append_image_tags(
+    id: String,
+    tags: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Image>, String> {
+    let mgr = state.image_manager.clone();
+    tokio::task::spawn_blocking(move || mgr.append_tags(&id, &tags))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// How many deleted items are being kept out of search results and
+/// downloads.
+#[tauri::command]
+fn blocked_count(state: tauri::State<'_, AppState>) -> usize {
+    state.image_manager.blocked_count()
+}
+
+/// Forget every deleted item so it can be found and downloaded again.
+#[tauri::command]
+async fn clear_blocked(state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    let mgr = state.image_manager.clone();
+    let cleared = tokio::task::spawn_blocking(move || mgr.clear_blocked())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    tracing::info!("blocked list cleared: {cleared} item(s)");
+    Ok(cleared)
 }
 
 // ---------- Search & download ----------
@@ -260,7 +358,7 @@ async fn search_images(
         .filter(|r| {
             !r.url.is_empty()
                 && !manager.is_url_saved(&r.url)
-                && !manager.is_source_id_saved(&r.source, &r.source_id)
+                && !manager.is_source_id_saved(&r.source, &r.kind, &r.source_id)
         })
         .collect();
     tracing::info!("search finished: {} new result(s)", filtered.len());
@@ -338,6 +436,9 @@ pub struct VisionAnalyzeParams {
     caption_task: Option<String>,
     #[serde(default)]
     caption_min_chars: Option<usize>,
+    /// Keep captions a person wrote, whatever the mode. Defaults to true.
+    #[serde(default)]
+    protect_manual: Option<bool>,
     #[serde(default)]
     load_if_needed: Option<bool>,
     #[serde(default)]
@@ -347,8 +448,7 @@ pub struct VisionAnalyzeParams {
 #[derive(Debug, Clone)]
 struct LibraryAnalyzeOptions {
     detect_objects: bool,
-    caption_mode: CaptionWriteMode,
-    caption_min_chars: usize,
+    caption_policy: CaptionPolicy,
     caption_task: Option<String>,
 }
 
@@ -441,7 +541,12 @@ async fn vision_load(
 
 #[tauri::command]
 async fn vision_unload(state: tauri::State<'_, AppState>) -> Result<VisionStatus, String> {
-    state.vision.unload_all();
+    if !state.vision.try_unload() {
+        return Err(
+            "Florence-2 is busy analyzing. Wait for the running job to finish, then unload."
+                .to_string(),
+        );
+    }
     tracing::info!("Florence-2 unloaded");
     Ok(state.vision.status())
 }
@@ -461,6 +566,10 @@ async fn vision_analyze_images(
             results: Vec::new(),
         });
     }
+
+    // Held until the last image is done, so nothing unloads the model
+    // part-way through this batch.
+    let _job = state.vision.begin_job();
 
     if !state.vision.status().loaded {
         if params.load_if_needed.unwrap_or(false) {
@@ -507,7 +616,11 @@ async fn vision_analyze_images(
     let detect_objects = params.detect_objects.unwrap_or(true);
     let caption_mode =
         parse_caption_write_mode(params.caption_mode.as_deref(), params.overwrite_caption);
-    let caption_min_chars = params.caption_min_chars.unwrap_or(80).clamp(1, 1000);
+    let caption_policy = CaptionPolicy {
+        mode: caption_mode,
+        min_chars: params.caption_min_chars.unwrap_or(80).clamp(1, 1000),
+        protect_manual: params.protect_manual.unwrap_or(true),
+    };
     let caption_task = (caption_mode != CaptionWriteMode::Skip)
         .then(|| caption_task_from_name(params.caption_task.as_deref()).to_string());
     let max_concurrency = state.vision.status().instances.clamp(1, 32);
@@ -516,11 +629,12 @@ async fn vision_analyze_images(
         .unwrap_or(max_concurrency)
         .clamp(1, max_concurrency);
     tracing::info!(
-        "Florence-2 analysis started: {} image(s), concurrency {}, detect_objects={}, caption_mode={}, caption_task={}",
+        "Florence-2 analysis started: {} image(s), concurrency {}, detect_objects={}, caption_mode={}, protect_manual={}, caption_task={}",
         ids.len(),
         concurrency,
         detect_objects,
         caption_mode.as_str(),
+        caption_policy.protect_manual,
         caption_task.as_deref().unwrap_or("none")
     );
 
@@ -529,8 +643,7 @@ async fn vision_analyze_images(
     let vision = state.vision.clone();
     let analyze_options = LibraryAnalyzeOptions {
         detect_objects,
-        caption_mode,
-        caption_min_chars,
+        caption_policy,
         caption_task,
     };
     let results: Vec<VisionAnalyzeItem> = stream::iter(ids.clone())
@@ -598,37 +711,6 @@ fn dedupe_ids(ids: Vec<String>) -> Vec<String> {
         }
     }
     out
-}
-
-fn merge_object_tags(
-    existing: &[String],
-    objects: &[crate::vision::DetectedObject],
-) -> (Vec<String>, Vec<String>) {
-    let mut merged = Vec::with_capacity(existing.len() + objects.len());
-    let mut seen = HashSet::new();
-    for tag in existing {
-        let trimmed = tag.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if seen.insert(trimmed.to_ascii_lowercase()) {
-            merged.push(trimmed.to_string());
-        }
-    }
-
-    let mut added = Vec::new();
-    for object in objects {
-        let label = object.label.trim();
-        if label.is_empty() {
-            continue;
-        }
-        if seen.insert(label.to_ascii_lowercase()) {
-            let tag = label.to_string();
-            merged.push(tag.clone());
-            added.push(tag);
-        }
-    }
-    (merged, added)
 }
 
 fn analyze_library_image(
@@ -712,6 +794,8 @@ fn analyze_library_image(
         )
     })) {
         Ok(Ok(result)) => result,
+        // `image` was read before inference started and may be stale by now,
+        // so failures return no image rather than an out-of-date copy.
         Ok(Err(e)) => {
             return VisionAnalyzeItem {
                 id,
@@ -722,7 +806,7 @@ fn analyze_library_image(
                 caption_written: false,
                 tags_added: Vec::new(),
                 objects: Vec::new(),
-                image: Some(image),
+                image: None,
             }
         }
         Err(panic) => {
@@ -736,48 +820,54 @@ fn analyze_library_image(
                 caption_written: false,
                 tags_added: Vec::new(),
                 objects: Vec::new(),
-                image: Some(image),
+                image: None,
             };
         }
     };
 
+    // Inference took a while; the row may have been edited or deleted since
+    // it was read above. `apply_vision_result` re-reads it under the database
+    // lock and decides against what is there now.
     let caption = analysis.caption.trim().to_string();
-    let caption_written = should_write_caption(
-        options.caption_mode,
-        &image.alt,
-        &caption,
-        options.caption_min_chars,
-    );
-    let caption_patch = caption_written.then_some(caption.clone());
-    let (merged_tags, tags_added) = merge_object_tags(&image.tags, &analysis.objects);
-    let tags_patch = (!tags_added.is_empty()).then_some(merged_tags);
-
-    let update_result = manager.update_image_metadata(&id, caption_patch, tags_patch, Some(true));
-    if let Err(e) = update_result {
-        return VisionAnalyzeItem {
+    let labels: Vec<String> = analysis
+        .objects
+        .iter()
+        .map(|object| object.label.clone())
+        .collect();
+    match manager.apply_vision_result(&id, &caption, &labels, &options.caption_policy) {
+        Ok(Some(outcome)) => VisionAnalyzeItem {
+            id,
+            ok: true,
+            skipped: false,
+            error: None,
+            caption: Some(caption),
+            caption_written: outcome.caption_written,
+            tags_added: outcome.tags_added,
+            objects: analysis.objects,
+            image: Some(outcome.image),
+        },
+        Ok(None) => VisionAnalyzeItem {
+            id,
+            ok: false,
+            skipped: true,
+            error: Some("item was deleted while it was being analyzed".to_string()),
+            caption: Some(caption),
+            caption_written: false,
+            tags_added: Vec::new(),
+            objects: analysis.objects,
+            image: None,
+        },
+        Err(e) => VisionAnalyzeItem {
             id,
             ok: false,
             skipped: false,
             error: Some(e.to_string()),
             caption: Some(caption),
-            caption_written,
-            tags_added,
+            caption_written: false,
+            tags_added: Vec::new(),
             objects: analysis.objects,
-            image: Some(image),
-        };
-    }
-
-    let updated = manager.get_image_by_id(&id).ok().flatten().unwrap_or(image);
-    VisionAnalyzeItem {
-        id,
-        ok: true,
-        skipped: false,
-        error: None,
-        caption: Some(caption),
-        caption_written,
-        tags_added,
-        objects: analysis.objects,
-        image: Some(updated),
+            image: None,
+        },
     }
 }
 
@@ -793,7 +883,7 @@ fn parse_precision(s: Option<&str>) -> Precision {
 
 // ---------- Image binary access ----------
 
-fn resolve_library_media_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_library_media_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel = rel.trim();
     if rel.is_empty() {
         return Err("no local media path on record".to_string());
@@ -895,7 +985,7 @@ fn media_protocol_error(status: StatusCode, message: &str) -> Response<Vec<u8>> 
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
-fn parse_media_range(header_value: &str, len: u64) -> Option<(u64, u64)> {
+pub(crate) fn parse_media_range(header_value: &str, len: u64) -> Option<(u64, u64)> {
     if len == 0 {
         return None;
     }
@@ -1090,6 +1180,98 @@ fn shutdown_app() {
     shutdown_app_process();
 }
 
+/// Event sent to the UI when the window is closed while downloads or an
+/// analysis job are still running. The UI asks the user and, if they agree,
+/// calls `shutdown_app`.
+const CLOSE_BLOCKED_EVENT: &str = "close-blocked";
+
+/// One click on the window's close button can reach us through more than one
+/// event hook; deliveries this close together are the same click.
+const CLOSE_DUPLICATE_WINDOW: Duration = Duration::from_millis(750);
+
+struct CloseWarning {
+    warned_at: Option<Instant>,
+    /// Set once the UI confirms it received the warning.
+    acknowledged: bool,
+}
+
+static CLOSE_WARNING: Mutex<CloseWarning> = Mutex::new(CloseWarning {
+    warned_at: None,
+    acknowledged: false,
+});
+
+/// What to do with a request to close the window.
+#[derive(Debug, PartialEq, Eq)]
+enum CloseDecision {
+    /// Nothing is running (or the UI is not answering): quit now.
+    Exit,
+    /// Work is running: keep the window and ask the user.
+    Warn,
+    /// A repeat delivery of a click that is already being handled.
+    Ignore,
+}
+
+fn decide_close(busy: bool, warning: &mut CloseWarning, now: Instant) -> CloseDecision {
+    if !busy {
+        return CloseDecision::Exit;
+    }
+    if let Some(at) = warning.warned_at {
+        if !warning.acknowledged {
+            if now.saturating_duration_since(at) < CLOSE_DUPLICATE_WINDOW {
+                return CloseDecision::Ignore;
+            }
+            // The last warning was never picked up, so the UI is not able to
+            // ask. Closing again must work — never trap the user in the app.
+            return CloseDecision::Exit;
+        }
+    }
+    warning.warned_at = Some(now);
+    warning.acknowledged = false;
+    CloseDecision::Warn
+}
+
+fn handle_close_request(app: &tauri::AppHandle) {
+    let downloads = downloader::active_downloads();
+    let analyses = app
+        .try_state::<AppState>()
+        .map(|state| state.vision.active_jobs())
+        .unwrap_or(0);
+    let decision = {
+        let mut warning = CLOSE_WARNING.lock().unwrap_or_else(|p| p.into_inner());
+        decide_close(downloads + analyses > 0, &mut warning, Instant::now())
+    };
+    match decision {
+        CloseDecision::Exit => shutdown_app_process(),
+        CloseDecision::Ignore => {}
+        CloseDecision::Warn => {
+            tracing::info!(
+                "close requested with work running ({downloads} download(s), {analyses} analysis job(s)); asking the user"
+            );
+            let payload = json!({ "downloads": downloads, "analyses": analyses });
+            if app.emit(CLOSE_BLOCKED_EVENT, payload).is_err() {
+                shutdown_app_process();
+            }
+        }
+    }
+}
+
+/// Work that quitting right now would cut off. The UI's Shutdown button asks
+/// before quitting when either count is non-zero.
+#[tauri::command]
+fn active_work(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    json!({
+        "downloads": downloader::active_downloads(),
+        "analyses": state.vision.active_jobs(),
+    })
+}
+
+/// Called by the UI as soon as it receives the close warning.
+#[tauri::command]
+fn close_warning_ack() {
+    let mut warning = CLOSE_WARNING.lock().unwrap_or_else(|p| p.into_inner());
+    warning.acknowledged = true;
+}
+
 // ---------- Settings ----------
 
 #[tauri::command]
@@ -1225,6 +1407,36 @@ async fn topic_image_ids(
         .map_err(|e| e.to_string())
 }
 
+/// Results the topic fetched earlier that were never downloaded or
+/// dismissed. Lets the UI pick up where the user left off.
+#[tauri::command]
+async fn topic_pending(
+    topic_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<SearchResult>, String> {
+    let store = state.topics.clone();
+    let manager = state.image_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        store.pending_results(&topic_id, &manager, topics::MAX_PENDING_RESULTS)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// Discard the topic's pending results. They stay marked as seen.
+#[tauri::command]
+async fn topic_dismiss_pending(
+    topic_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<usize, String> {
+    let store = state.topics.clone();
+    tokio::task::spawn_blocking(move || store.dismiss_pending(&topic_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn topic_rename(
     topic_id: String,
@@ -1258,13 +1470,17 @@ async fn save_settings(
     settings: Settings,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    // One settings write at a time, shared with the REST settings endpoints.
+    let _save = config::SAVE_LOCK.lock().await;
     let path = state.paths.config_file.clone();
     let to_save = settings.clone();
     tokio::task::spawn_blocking(move || to_save.save(&path))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    *state.settings.write().await = settings;
+    *state.settings.write().await = settings.clone();
+    let bound = state.api_server.bound.read().await.clone();
+    republish_discovery(state.paths.as_ref(), &settings, bound);
     Ok(())
 }
 
@@ -1292,6 +1508,12 @@ pub fn run() {
             )
             .with(crate::logbuf::BufferLayer::new(log_buffer.clone()))
             .try_init();
+    }
+
+    tracing::info!("data directory: {}", paths.root.display());
+    let leftovers = downloader::cleanup_partial_files(&paths);
+    if leftovers > 0 {
+        tracing::info!("removed {leftovers} unfinished download file(s) from a previous run");
     }
 
     let mut settings = Settings::load_or_default(&paths.config_file);
@@ -1367,8 +1589,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window;
-                shutdown_app_process();
+                handle_close_request(window.app_handle());
             }
         })
         .setup(move |app| {
@@ -1397,6 +1618,7 @@ pub fn run() {
             delete_images,
             is_url_saved,
             update_image,
+            append_image_tags,
             search_images,
             download_images,
             validate_api_key,
@@ -1409,6 +1631,12 @@ pub fn run() {
             topic_delete,
             topic_image_ids,
             topic_rename,
+            topic_pending,
+            topic_dismiss_pending,
+            blocked_count,
+            clear_blocked,
+            close_warning_ack,
+            active_work,
             get_settings,
             save_settings,
             get_system_stats,
@@ -1428,7 +1656,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Media Buddy")
-        .run(|_app_handle, event| match event {
+        .run(|app_handle, event| match event {
             tauri::RunEvent::ExitRequested { api, .. } => {
                 api.prevent_exit();
                 shutdown_app_process();
@@ -1438,8 +1666,91 @@ pub fn run() {
                 ..
             } => {
                 api.prevent_close();
-                shutdown_app_process();
+                handle_close_request(app_handle);
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::{discovery_base_url, discovery_is_specific_non_loopback};
+
+    #[test]
+    fn wildcard_discovery_uses_reachable_local_address() {
+        assert_eq!(discovery_base_url("0.0.0.0", 5000), "http://127.0.0.1:5000");
+        assert_eq!(discovery_base_url("::", 5000), "http://127.0.0.1:5000");
+        assert!(!discovery_is_specific_non_loopback("0.0.0.0"));
+    }
+
+    #[test]
+    fn specific_interface_is_published_for_suite_discovery() {
+        assert_eq!(
+            discovery_base_url("172.28.64.1", 5000),
+            "http://172.28.64.1:5000"
+        );
+        assert!(discovery_is_specific_non_loopback("172.28.64.1"));
+    }
+
+    #[test]
+    fn ipv6_discovery_is_bracketed() {
+        assert_eq!(discovery_base_url("fd00::1", 5000), "http://[fd00::1]:5000");
+        assert!(discovery_is_specific_non_loopback("fd00::1"));
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::{decide_close, CloseDecision, CloseWarning, CLOSE_DUPLICATE_WINDOW};
+    use std::time::{Duration, Instant};
+
+    fn fresh() -> CloseWarning {
+        CloseWarning {
+            warned_at: None,
+            acknowledged: false,
+        }
+    }
+
+    #[test]
+    fn idle_app_closes_immediately() {
+        assert_eq!(
+            decide_close(false, &mut fresh(), Instant::now()),
+            CloseDecision::Exit
+        );
+    }
+
+    #[test]
+    fn busy_app_warns_once_per_click() {
+        let mut warning = fresh();
+        let t0 = Instant::now();
+        assert_eq!(decide_close(true, &mut warning, t0), CloseDecision::Warn);
+        // The same click arriving through a second event hook.
+        assert_eq!(
+            decide_close(true, &mut warning, t0 + Duration::from_millis(5)),
+            CloseDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn acknowledged_warning_asks_again_next_time() {
+        let mut warning = fresh();
+        let t0 = Instant::now();
+        assert_eq!(decide_close(true, &mut warning, t0), CloseDecision::Warn);
+        warning.acknowledged = true; // UI showed the question; user said no
+        assert_eq!(
+            decide_close(true, &mut warning, t0 + Duration::from_secs(20)),
+            CloseDecision::Warn
+        );
+    }
+
+    #[test]
+    fn unanswered_warning_never_traps_the_user() {
+        let mut warning = fresh();
+        let t0 = Instant::now();
+        assert_eq!(decide_close(true, &mut warning, t0), CloseDecision::Warn);
+        assert_eq!(
+            decide_close(true, &mut warning, t0 + CLOSE_DUPLICATE_WINDOW * 2),
+            CloseDecision::Exit
+        );
+    }
 }

@@ -2,12 +2,13 @@
 
 ## Supported Versions
 
-Media Buddy is currently published as a `0.1.x` public preview.
+Media Buddy is currently published as a `0.2.x` public preview. Fixes go into
+the newest release only.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | Yes |
-| older | No |
+| 0.2.x | Yes |
+| 0.1.x | No |
 
 ## Reporting A Vulnerability
 

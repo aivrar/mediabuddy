@@ -1,5 +1,12 @@
-import { createSignal, onMount, Switch, Match, type Component } from "solid-js";
-import { api } from "./lib/api";
+import {
+  createSignal,
+  onCleanup,
+  onMount,
+  Switch,
+  Match,
+  type Component,
+} from "solid-js";
+import { api, onCloseBlocked, type ActiveWork } from "./lib/api";
 import "./App.css";
 import "./styles/theme.css";
 import Tabs from "./components/Tabs";
@@ -35,13 +42,53 @@ const App: Component = () => {
     }
   });
 
-  const shutdown = () => {
+  const quitQuestion = (work: ActiveWork) => {
+    const parts: string[] = [];
+    if (work.downloads > 0) parts.push("downloads");
+    if (work.analyses > 0) parts.push("AI analysis");
+    return `Media Buddy is still working (${parts.join(" and ")}). Quitting now stops it part-way: unfinished downloads are discarded and images not yet analyzed stay unanalyzed.\n\nQuit anyway?`;
+  };
+
+  const quitNow = () => {
     if (shuttingDown()) return;
     setShuttingDown(true);
     void api.shutdownApp().catch(() => {
       window.close();
     });
   };
+
+  // Shutdown button: check for running work first.
+  const shutdown = async () => {
+    if (shuttingDown()) return;
+    try {
+      const work = await api.activeWork();
+      if (work.downloads + work.analyses > 0 && !confirm(quitQuestion(work))) {
+        return;
+      }
+    } catch {
+      // If the check itself fails, don't block quitting.
+    }
+    quitNow();
+  };
+
+  // Window close button: the backend holds the window open and sends this
+  // event when work is running. Acknowledge first so it knows the question
+  // reached the user; if it never hears back, a second close forces a quit.
+  onMount(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onCloseBlocked((work) => {
+      void api.closeWarningAck().catch(() => {});
+      if (confirm(quitQuestion(work))) quitNow();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    onCleanup(() => {
+      disposed = true;
+      unlisten?.();
+    });
+  });
 
   return (
     <div class="app">
@@ -53,7 +100,7 @@ const App: Component = () => {
           <button
             type="button"
             class="shutdown-button"
-            onClick={shutdown}
+            onClick={() => void shutdown()}
             disabled={shuttingDown()}
             title="Shut down Media Buddy"
           >

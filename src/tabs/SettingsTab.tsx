@@ -53,6 +53,41 @@ const SettingsTab: Component = () => {
   const [visionBusy, setVisionBusy] = createSignal(false);
   const [visionError, setVisionError] = createSignal<string | null>(null);
   const [visionNotice, setVisionNotice] = createSignal<string | null>(null);
+  const [blockedCount, setBlockedCount] = createSignal<number | null>(null);
+  const [blockedBusy, setBlockedBusy] = createSignal(false);
+  const [blockedNotice, setBlockedNotice] = createSignal<string | null>(null);
+
+  const refreshBlocked = async () => {
+    try {
+      setBlockedCount(await api.blockedCount());
+    } catch {
+      setBlockedCount(null);
+    }
+  };
+
+  const clearBlocked = async () => {
+    const count = blockedCount() ?? 0;
+    if (count === 0) return;
+    if (
+      !confirm(
+        `Clear the blocked list? ${count} deleted item${count === 1 ? "" : "s"} will be allowed to show up in searches and be downloaded again.`
+      )
+    )
+      return;
+    setBlockedBusy(true);
+    setBlockedNotice(null);
+    try {
+      const cleared = await api.clearBlocked();
+      setBlockedNotice(
+        `Cleared ${cleared} blocked item${cleared === 1 ? "" : "s"}.`
+      );
+    } catch (e) {
+      setBlockedNotice(`Could not clear the blocked list: ${String(e)}`);
+    } finally {
+      setBlockedBusy(false);
+      await refreshBlocked();
+    }
+  };
 
   const errorMessage = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -102,6 +137,7 @@ const SettingsTab: Component = () => {
     try {
       setSettings(await api.getSettings());
       await refreshVision();
+      await refreshBlocked();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -642,6 +678,28 @@ const SettingsTab: Component = () => {
                   }
                 />
               </Field>
+            </Section>
+
+            <Section title="Library">
+              <Field label="Deleted items">
+                <div class="blocked-row">
+                  <span>
+                    {blockedCount() ?? "—"} kept out of search results and
+                    downloads
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void clearBlocked()}
+                    disabled={blockedBusy() || !blockedCount()}
+                    title="Deleting an item blocks it from coming back. Clearing the list lets those items be found and downloaded again."
+                  >
+                    {blockedBusy() ? "Clearing…" : "Clear blocked list"}
+                  </button>
+                </div>
+              </Field>
+              <Show when={blockedNotice()}>
+                <div class="settings-warning">{blockedNotice()}</div>
+              </Show>
             </Section>
           </div>
           </>
